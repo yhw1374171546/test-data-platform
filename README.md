@@ -15,7 +15,7 @@
 
 | # | 交付 | 状态 | 验收数据 |
 | --- | --- | --- | --- |
-| 1 | 16 张表 + 索引（`migrations/versions/001_baseline.sql`） | ✅ | 16 表 / 37 索引，PG 16 实跑 |
+| 1 | 16 张表 + 索引（`migrations/sql/001_baseline.sql`，由 Alembic 编排） | ✅ | 16 表 / 41 索引 + `alembic_version`，PG 16 实跑 |
 | 2 | 预约主链路：条件更新 + 物理幂等 + 取消释放 | ✅ | **1000 并发抢同一档期 → `created=1`、`slot_taken=999`、重复占用 0** |
 | 3 | 问题单状态机（显式转移表 + 审计 + 幂等） | ✅ | **64 个 (from,to) 组合全遍历 → 合法 15 条全过、非法全 409、审计条数 == 合法转移数** |
 | 4 | API 层（预约 / 问题单 / 健康检查 / 指标 / 统一错误体） | ✅ | 端到端冒烟全通过 |
@@ -34,7 +34,7 @@
 | 5 | **缓存一致性**：A 同步删 / B 延迟双删 / C 消息驱动 + **负对照** + 批量消费 | ✅ | **负对照脏读 99.65%（证明能测出）；A 1.72% / B 4.30% / C 10.12%（C 的窗口=消费延迟，有界且不丢）；TTL 兜底后全部收敛** |
 | 6 | **占用方案 P99** + **50 万条 keyset 深分页** + 性能索引迁移 | ✅ | **A/B/C 正确性一致（恰好 1 人成功）；P99 A 269ms / B 275ms / C 25ms（DB 语句 603→9）；分页第 25000 页 OFFSET 148ms vs keyset 1.2ms（128x）；带 project 过滤时浅页 113ms→1.5ms，靠复合索引** |
 
-报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md)
+报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md)
 
 **当前测试规模：150 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 34），`dev.cmd` 端到端冒烟 **40 项**。
 
@@ -57,7 +57,7 @@ dev.cmd
 | `dev.cmd smoke` | 起临时服务，跑 40 项真实 HTTP 冒烟（含缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
-| `dev.cmd bench` | 八项实验：档期竞争（1000）+ 领取竞争（20）+ 提交竞争（20）+ outbox 故障注入 + 对账注入 + 缓存一致性 + 占用三方案 P99 + 深分页 |
+| `dev.cmd bench` | **十项实验**：档期竞争（1000）+ 领取竞争（20）+ 提交竞争（20）+ outbox 故障注入 + 对账注入 + 缓存一致性 + 占用三方案 P99 + 深分页 + 多 worker + HTTP 层压测 |
 | `dev.cmd api -Port 8000 -Reload` | 启动服务 → <http://127.0.0.1:8000/docs> |
 | `dev.cmd docs` | 打印地址与可直接复制的示例请求 |
 
@@ -224,7 +224,9 @@ test-data-platform/
 │   ├── infra/        db.py · idempotency.py · metrics.py
 │   │                 cache.py（三策略 + 负对照）· redis_lock.py（预占：C 方案的漏斗）
 │   └── main.py       中间件（trace_id + 指标）→ 路由 → 运维端点
-├── migrations/versions/001_baseline.sql · 002_perf_indexes.sql（幂等增补索引）
+├── alembic.ini · migrations/env.py（不做 autogenerate：表是手写 SQL）
+├── migrations/sql/001_baseline.sql · 002_perf_indexes.sql（DDL 单一来源）
+├── migrations/versions/0001_baseline.py · 0002_perf_indexes.py（只做版本编排）
 ├── scripts/          init_db.py（建库建表+演示数据）· api_smoke.py（真实 HTTP 冒烟）
 │                     outbox_worker.py（常驻 worker）· recon.py（对账命令行）
 ├── tests/            test_defect_state.py · test_defect_flow.py · test_queue_state.py
@@ -236,10 +238,11 @@ test-data-platform/
 │                     execution_submit.py（提交竞争）· outbox_fault.py（故障注入）
 │                     recon_inject.py（对账注入）· cache_consistency.py（缓存一致性）
 │                     slot_schemes.py（占用三方案 P99）· pagination.py（深分页）
+│                     multi_worker.py（多 worker 不重复处理）· http_load.py（HTTP 层压测）
 ├── docs/             技术方案.md · 实验报告_第1周.md · 实验报告_任务领取.md
 │                     实验报告_执行结果与outbox.md · 实验报告_outbox汇总与故障注入.md
 │                     实验报告_日终对账.md · 实验报告_缓存一致性.md
-│                     实验报告_P99与深分页.md
+│                     实验报告_P99与深分页.md · 实验报告_工程化.md
 ├── dev.ps1 / dev.cmd / requirements*.txt / pytest.ini
 ```
 
@@ -294,6 +297,13 @@ test-data-platform/
     带 `project_id` 过滤时浅页反而更慢（113ms）—— PG 只能扫描+过滤+排序。
     补 `(project_id, created_at DESC, id DESC)` 后回到 1.5ms 且不随深度增长。
 19. **endpoint 全部是同步 `def`**：DB 是阻塞的，写成 `async def` 会卡死事件循环。
+    代价是并发上限先被 anyio 的**线程池**卡住（默认 40），再叠上 DB 连接池 —— HTTP 层压测里
+    P99 比 service 层高 60~80ms，就是这两级排队，不是 uvicorn 慢。
+20. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
+    汇总 `total` 等于消息数（"重算"而不是"累加"，所以即使重复也不会多算）。
+    4 个 worker × 200 条实测：0 条重复、0 差异。
+21. **迁移要能处理"老库"**：`init_db.py` 发现"有表但没有 `alembic_version`"时先 `stamp head`
+    再 `upgrade` —— 否则已经建好的库只能删库重来。
 20. **`/metrics` 的 path 用路由模板**，不是真实 URL，否则每个 id 都变成一条时间序列。
 
 ---
@@ -332,6 +342,9 @@ test-data-platform/
 | 28 | P99 实验测出 C 方案"0 次 DB 事务" | 用了 `pg_stat_database.xact_commit` 差值，那张视图是异步刷新的。改成给 SQLAlchemy 挂 `before_cursor_execute` 事件精确计语句数（C 是 9 条，不是 0） |
 | 29 | 带 `project_id` 时 keyset 浅页要 113ms | 基线索引 `(created_at DESC, id DESC)` 覆盖不了过滤条件，PG 只能扫描+排序。补复合索引 `(project_id, created_at DESC, id DESC)` 后 1.5ms。**keyset 不是改 SQL 就快** |
 | 30 | `bench/pagination.py` 造完 50 万条后 `LIMIT 1 OFFSET 199980` 返回 None | 那一轮只造了 20 万条，`DEPTHS` 里的第 25000 页超出范围。加"`offset + 页大小 > 总行数` 就跳过"的守卫，游标为 None 时按"第 1 页"处理 |
+| 31 | `alembic.ini` 里写中文注释，`alembic current` 崩 `UnicodeDecodeError: 'gbk'` | `configparser` 按**系统 locale** 读 ini（中文 Windows 是 GBK），不认 UTF-8。**ini 只能放 ASCII**，说明写进 `env.py` |
+| 32 | 迁移里 `op.execute(整个 .sql)` 报 `cannot insert multiple commands into a prepared statement` | `op.execute` 走 psycopg3 扩展协议，带参数时禁止多语句。改成 `op.get_bind().connection.dbapi_connection.execute(sql)`（无参数 → 简单协议，支持多语句） |
+| 33 | 多 worker 实验里"明细 vs 汇总有差异"一直红 | `diff_summary()` 返回的是**字典**（`mismatched`/`missing`/`extra`/`diff_count`），写 `len(diffs)==0` 恒为 4。要用 `diffs["diff_count"]` |
 
 ---
 
@@ -344,13 +357,17 @@ test-data-platform/
 | 3 ✅ | ~~outbox worker~~ + ~~日终对账（含 `fail_without_defect`）~~ + ~~keyset 50 万条压测~~ + 性能索引迁移 | 第 25000 页 keyset 1.2ms vs OFFSET 148ms（128x）；带过滤时靠复合索引从 113ms → 1.5ms |
 
 **技术方案 §四 的 7 个技术点已全部完成**（4.1 占用 / 4.2 领取幂等 / 4.3 缓存 / 4.4 异步汇总 /
-4.5 状态机 / 4.6 对账 / 4.7 深分页）。剩下的都是**工程面**：
+4.5 状态机 / 4.6 对账 / 4.7 深分页），工程面也补齐了 Alembic / CI / 容器化 / HTTP 压测 / 多 worker。
+剩下的欠账：
 
 | 欠账 | 影响 | 建议做法 |
 | --- | --- | --- |
-| Alembic 化 | 现在靠 `001_baseline.sql` + 幂等 `002_*.sql`，能跑但不记录版本 | `alembic init` 后把 baseline 标成初始 revision，002 起走 autogenerate |
-| CI | 没有流水线，靠本地 `dev.cmd` | GitHub Actions：起 PG/Redis service → `dev.cmd test` + `dev.cmd smoke` |
-| Dockerfile / compose | 部署还是手工起进程 | 多阶段构建 + compose（pg/redis/app/worker 四个服务） |
+| ~~Alembic 化~~ ✅ | 已有 `0001_baseline` / `0002_perf_indexes` 版本链，老库自动 stamp | 后续加表：`alembic revision -m "..."` 再写 SQL（无 ORM 模型，不做 autogenerate） |
+| ~~CI~~ ✅ | [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：真 PG+Redis 跑 150 用例 + 40 项冒烟 + 镜像构建 | 推到 GitHub 后自动生效（当前无 remote） |
+| ~~Dockerfile / compose~~ ✅ | `docker compose up --build` 一条命令起 PG/Redis/migrate/app/worker | 本机没装 Docker，未经本地构建验证；CI 的 `docker` job 兜底 |
+| ~~HTTP 层压测 / 多 worker~~ ✅ | `bench/http_load.py`、`bench/multi_worker.py`（后者证明 0 条重复处理） | 容量结论仍只有单进程 uvicorn |
 | 幂等键 TTL | `idempotency_keys` 只增不删 | 定时任务按 `created_at` 删（索引已在 002 里备好） |
 | 429 限流 | 只有并发竞争，没有速率限制 | 网关层令牌桶，或按 `X-Request-ID` 维度 |
 | 认证 | 接口全开放 | 网关鉴权 + 内部服务用 mTLS |
+| 告警规则 / 调度 | 只有 `/metrics`，且 worker/对账靠手动跑 | Prometheus 规则（死信、积压、缓存未命中率）+ cron 或常驻 worker |
+| 缓存穿透 / 击穿 | 不存在的 key 会反复回源；热 key 过期瞬间回源 | 空值短 TTL 缓存 + 单飞重建 |
