@@ -1,0 +1,92 @@
+# 一条命令起全套：PG + Redis + 建表灌数据 + API + outbox worker
+#
+#   docker compose up --build
+#   → API      http://127.0.0.1:8000/docs
+#   → 指标     http://127.0.0.1:8000/metrics
+#   → PG       127.0.0.1:5433（和本地 dev.ps1 的端口一致，切过去不用改 DSN）
+#   → Redis    127.0.0.1:6380
+#
+# 为什么端口映射成 5433/6380 而不是 5432/6379：
+# 这台机器上本来就有绿色版 PG/Redis 占着 5433/6380，dev.ps1 也按这个配。
+# 容器内仍然是标准端口，所以容器间用 postgres:5432 / redis:6379 互访。
+
+name: tdp
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: tdp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # 中文不乱码、时区一致（业务日期按 Asia/Shanghai 切）
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: Asia/Shanghai
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tdp"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    # 演示环境不落盘：缓存本来就可以丢，重启后从 DB 回填
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # 一次性任务：建库建表 + 补索引 + 灌演示数据。跑完就退出。
+  migrate:
+    build: .
+    command: ["python", "scripts/init_db.py", "--seed-demo"]
+    environment: &env
+      TDP_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/tdp
+      TDP_REDIS_URL: redis://redis:6379/0
+      TDP_TZ: Asia/Shanghai
+      TDP_CACHE_STRATEGY: delete
+      TDP_POOL_SIZE: "20"
+      TDP_POOL_OVERFLOW: "20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    environment: *env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+  # 常驻 worker：执行结果 → 日报汇总 + 缓存失效消息
+  worker:
+    build: .
+    command: ["python", "scripts/outbox_worker.py", "--interval", "2"]
+    environment: *env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:

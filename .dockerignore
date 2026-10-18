@@ -1,0 +1,17 @@
+# 构建镜像时不需要的东西：测试、压测、文档、缓存、本地数据
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tests
+bench
+docs
+pgdata
+*.log
+.env
+Dockerfile
+docker-compose.yml
