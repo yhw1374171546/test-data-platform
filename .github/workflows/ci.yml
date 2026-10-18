@@ -71,7 +71,7 @@ jobs:
         run: ruff check app tests scripts bench --select F,E9,F63,F7,F82,B
 
       - name: 单元 + 集成测试（真库 + 真 Redis）
-        run: python -m pytest -q
+        run: python -m pytest -q --junitxml=pytest-report.xml
 
       - name: 端到端冒烟（真实 HTTP，40 项）
         run: |
@@ -82,12 +82,12 @@ jobs:
           done
           python scripts/api_smoke.py --base-url http://127.0.0.1:8000
 
-      - name: 归档测试报告
+      - name: 归档 junit 报告（失败时也能看到哪条挂了）
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-report
-          path: .pytest_cache/v/cache/lastfailed
+          path: pytest-report.xml
           if-no-files-found: ignore
 
   # ── 2. 镜像能构建、compose 文件合法（本地没装 Docker，靠 CI 兜底）──
