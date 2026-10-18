@@ -1,9 +1,24 @@
+# ── Python ──
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ── 本地数据 / 运行时产物 ──
 *.db
 *.db-shm
 *.db-wal
+pgdata/
+*.log
 .env
+
+# ── 编辑器 / 系统 ──
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
