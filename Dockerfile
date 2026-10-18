@@ -18,6 +18,9 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY migrations ./migrations
 COPY scripts ./scripts
+# alembic.ini 不是运行必需的（init_db 在代码里构造 Config），
+# 但拷进来之后容器里也能直接 `alembic upgrade head` / `alembic history`
+COPY alembic.ini ./
 
 # 非 root 运行（容器里的常规做法）
 RUN useradd --create-home --uid 10001 tdp \

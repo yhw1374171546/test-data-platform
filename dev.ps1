@@ -219,7 +219,7 @@ function Invoke-Python([string[]]$Arguments) {
 }
 
 function Get-DbStatus {
-    <# 返回 @{Code=0|2|3; Text='tables=16 indexes=37 db=tdp'} #>
+    <# 返回 @{Code=0|2|3; Text='tables=17 indexes=42 db=tdp schema=0002_perf_indexes'} #>
     $python = Get-PythonPath
     $text = (& $python 'scripts/init_db.py' '--check' 2>&1 | Out-String).Trim()
     return @{ Code = $LASTEXITCODE; Text = $text }
@@ -353,11 +353,13 @@ function Invoke-Bench {
     Invoke-Python @('bench/cache_consistency.py', '--readers', '20', '--writers', '20', '--seconds', '8')
     Invoke-Python @('bench/slot_schemes.py', '--concurrency', '100', '--rounds', '2')
     Invoke-Python @('bench/pagination.py', '--rows', '200000', '--iterations', '5')
+    Invoke-Python @('bench/multi_worker.py', '--workers', '3', '--messages', '60')
+    Invoke-Python @('bench/http_load.py', '--concurrency', '50', '--reads', '1000')
     # 压测会造执行结果，自然会产生 outbox 消息；跑一次 worker 收尾，
     # 这样"跑完压测"之后库里的汇总和明细也是一致的（不留积压）。
     Write-Note '收尾：把压测产生的执行结果汇总掉'
     Invoke-Python @('scripts/outbox_worker.py', '--drain')
-    Write-Ok '八项验收实验完成：档期不超占、任务恰好一人领到、提交恰好一次落库、故障后汇总收敛、对账 100% 检出、缓存脏读可测且能收敛、占用三方案 P99 可比、深分页 keyset 平坦'
+    Write-Ok '十项验收实验完成：档期不超占、任务恰好一人领到、提交恰好一次落库、故障后汇总收敛、对账 100% 检出、缓存脏读可测且能收敛、占用三方案 P99 可比、深分页 keyset 平坦、多 worker 不重复处理、HTTP 层并发语义不变'
     Write-Note '注意：压测会故意注入差错，所以全量对账（dev.cmd recon）会报出这些样本 —— 那是它该做的事'
 }
 
