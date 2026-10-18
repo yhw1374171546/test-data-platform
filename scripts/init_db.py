@@ -1,15 +1,16 @@
-"""建库 + 建表 + 演示数据：**幂等，可以重复执行**。
+"""建库 + 迁移到最新版本 + 演示数据：**幂等，可以重复执行**。
 
 为什么不用 psql.exe：
 `dev.ps1` 要能在"只装了 Python"的机器上跑起来。psycopg 本来就是服务依赖，
-直接在同一个进程里建库/建表，比要求用户去装 pgAdmin/psql 现实得多。
+直接在同一个进程里建库/跑迁移，比要求用户去装 pgAdmin/psql 现实得多。
 
 三个行为刻意设计成这样：
 · 库已存在 → 跳过，不报错（一键脚本必须能重复跑）；
-· 表已存在 → 跳过建表（不覆盖数据）；想重建请自己 drop database；
+· 表结构 → 交给 Alembic `upgrade head`；**老库（有表但没有 alembic_version）先 stamp 到 head**，
+  因为它的形状已经是最新的，不需要再跑一遍 DDL；
 · `--seed-demo` → 演示主数据，用 ON CONFLICT 保证重复执行不会插重。
 
-建表在一个事务里执行：SQL 中途报错会整体回滚，不会留下"建了一半的表"。
+`--drop` 是唯一的破坏性操作，专门给"我想从头来一遍"用。
 """
 from __future__ import annotations
 
@@ -22,14 +23,11 @@ BASE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 import psycopg                                              # noqa: E402
+from alembic import command as alembic_command             # noqa: E402
+from alembic.config import Config as AlembicConfig          # noqa: E402
 from psycopg.conninfo import conninfo_to_dict, make_conninfo  # noqa: E402
 
 from app.infra.db import DATABASE_URL                        # noqa: E402
-
-BASELINE = BASE / "migrations" / "versions" / "001_baseline.sql"
-# 002 之后的增补脚本：必须幂等（每次 init 都重跑）
-EXTRA_MIGRATIONS = sorted(
-    p for p in (BASE / "migrations" / "versions").glob("00[2-9]*.sql"))
 
 # ── 演示数据（全部来自"整车测试"这个真实场景，不是 foo/bar）──
 DEMO_PROJECT = ("U8-CITY-NOA-2025Q3", "U8 城市 NOA 2025Q3", "U8")
@@ -82,25 +80,57 @@ def index_count(dsn: str) -> int:
             "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public'").fetchone()[0])
 
 
-def apply_baseline(dsn: str) -> None:
-    sql = BASELINE.read_text(encoding="utf-8")
+def schema_version(dsn: str) -> str:
+    """当前 alembic 版本号；没有版本表（老库）返回空串。"""
     with psycopg.connect(dsn, connect_timeout=5) as conn:
-        conn.execute(sql)                     # 无参数 → 走简单查询协议，可执行多语句
-        conn.commit()                         # 中途报错则整体回滚
+        row = conn.execute(
+            "SELECT to_regclass('public.alembic_version') IS NOT NULL").fetchone()
+        if not row or not row[0]:
+            return ""
+        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    return str(row[0]) if row else ""
 
 
-def apply_extra_migrations(dsn: str) -> None:
-    """执行 `migrations/versions/00[2-9]*.sql` 里的增补 DDL。
+def alembic_config(dsn: str) -> AlembicConfig:
+    """在代码里构造配置，不依赖当前工作目录，也不依赖 alembic.ini 是否被拷进镜像。"""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", str(BASE / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", dsn.replace(
+        "postgresql://", "postgresql+psycopg://", 1))
+    return cfg
 
-    约定：这些文件里的每条语句都必须是幂等的（`CREATE INDEX IF NOT EXISTS` 之类），
-    因为每次 `init` 都会重跑。真正的 Alembic 化是后面的工程项，这里先用最小代价
-    让"索引能随代码演进"。
-    """
-    for script in sorted(EXTRA_MIGRATIONS):
-        sql = script.read_text(encoding="utf-8")
-        with psycopg.connect(dsn, connect_timeout=5) as conn:
-            conn.execute(sql)
-            conn.commit()
+
+def upgrade_schema(dsn: str) -> str:
+    """把库迁到 head。返回 'upgraded' / 'stamped'（老库只补版本号）/ 'already'。"""
+    tables = table_count(dsn)
+    version = schema_version(dsn)
+
+    if tables == 0:
+        alembic_command.upgrade(alembic_config(dsn), "head")
+        return "upgraded"
+
+    if version:
+        alembic_command.upgrade(alembic_config(dsn), "head")
+        return "already"
+
+    # 老库：表已经是最新形状（手工跑过 001+002），只缺版本号。
+    # 直接 upgrade 会因为"表已存在"而失败，所以先 stamp 到 head。
+    alembic_command.stamp(alembic_config(dsn), "head")
+    return "stamped"
+
+
+def drop_database(dsn: str) -> bool:
+    """删库（破坏性）。返回 True 表示确实删掉了。"""
+    info = conninfo_to_dict(dsn)
+    name = info.get("dbname") or "tdp"
+    admin = make_conninfo(dsn, dbname="postgres")
+    with psycopg.connect(admin, autocommit=True, connect_timeout=5) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone()
+        if not exists:
+            return False
+        conn.execute(f'DROP DATABASE "{name.replace(chr(34), chr(34) * 2)}"')
+        return True
 
 
 def seed_demo(dsn: str) -> Dict[str, int]:
@@ -171,6 +201,8 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--seed-demo", action="store_true", help="写入演示主数据（可重复执行）")
     ap.add_argument("--check", action="store_true",
                     help="只体检：打印 tables=/indexes=，退出码 0=就绪 2=连不上 3=未建表")
+    ap.add_argument("--drop", action="store_true",
+                    help="先删库再重建（破坏性操作，专门给「我想从头来一遍」用）")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -189,33 +221,26 @@ def main(argv: List[str] | None = None) -> int:
             print(f"[check] 连不上 PostgreSQL：{exc}", file=sys.stderr)
             return 2
         print(f"tables={tables} indexes={indexes} "
-              f"db={conninfo_to_dict(dsn).get('dbname', '?')}")
+              f"db={conninfo_to_dict(dsn).get('dbname', '?')} "
+              f"schema={schema_version(dsn) or '-'}")
         return 0 if tables >= 16 else 3
 
     try:
+        if args.drop:
+            dropped = drop_database(dsn)
+            say(f"[init] 已删库（{'删掉了' if dropped else '本来就不存在'}）")
+
         created = ensure_database(dsn)
         say(f"[init] 数据库 {'已创建' if created else '已存在'}"
             f"（dbname={conninfo_to_dict(dsn).get('dbname', '?')}）")
 
-        tables = table_count(dsn)
-        if tables == 0:
-            if not BASELINE.exists():
-                print(f"[init] 找不到基线 DDL：{BASELINE}", file=sys.stderr)
-                return 1
-            apply_baseline(dsn)
-            tables = table_count(dsn)
-            say(f"[init] 已建表 {tables} 张 / 索引 {index_count(dsn)} 个")
-        else:
-            say(f"[init] 表已存在，跳过建表（{tables} 张 / 索引 {index_count(dsn)} 个）")
-
-        # 增补索引：全部 IF NOT EXISTS，每次 init 都跑一遍是安全的。
-        # 001 是一次性建表，之后的索引改动放 002 —— 没有 Alembic 之前，
-        # 这是"能增量演进又不破坏已有库"的最小做法。
-        before = index_count(dsn)
-        apply_extra_migrations(dsn)
-        after = index_count(dsn)
-        if after > before:
-            say(f"[init] 已补建索引 {after - before} 个（合计 {after} 个）")
+        # 表结构统一交给 Alembic：新库 upgrade 到 head，老库只补版本号
+        mode = upgrade_schema(dsn)
+        note = {"upgraded": "已执行全部迁移",
+                "stamped": "老库没有版本表，已 stamp 到 head（表结构本来就是最新的）",
+                "already": "已是最新版本"}[mode]
+        say(f"[init] schema {note}：{schema_version(dsn)} "
+            f"（{table_count(dsn)} 张表 / {index_count(dsn)} 个索引）")
 
         if args.seed_demo:
             stats = seed_demo(dsn)
