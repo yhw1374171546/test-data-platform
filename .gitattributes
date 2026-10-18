@@ -1,0 +1,9 @@
+# 统一换行符，避免 Windows 开发 + Linux CI 之间的整文件 diff
+# - 仓库里统一存 LF（Python/SQL/YAML 都是）
+# - 只有 PowerShell / cmd 脚本在检出时转回 CRLF（PS 5.1 对 LF 的 .ps1 也能跑，但 CRLF 更稳）
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
