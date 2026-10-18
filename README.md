@@ -53,7 +53,7 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（143 个用例，真库 + Redis） |
+| `dev.cmd test` | `pytest`（150 个用例，真库 + Redis） |
 | `dev.cmd smoke` | 起临时服务，跑 40 项真实 HTTP 冒烟（含缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
@@ -63,6 +63,40 @@ dev.cmd
 
 > `dev.cmd` 是 `dev.ps1` 的包装器：Windows 默认 `ExecutionPolicy=Restricted` 会拒绝执行 `.ps1`，
 > 包装器用 `-ExecutionPolicy Bypass` **只对本进程生效**，不改用户的系统安全设置。
+
+### 容器化（换台机器不用装 Python/PG/Redis）
+
+```bash
+docker compose up --build
+```
+
+| 容器 | 作用 | 对外 |
+| --- | --- | --- |
+| `postgres` | PG 16，数据在 `pgdata` 卷里 | `127.0.0.1:5433` |
+| `redis` | Redis 7，不落盘（缓存本来可丢） | `127.0.0.1:6380` |
+| `migrate` | 一次性：建表 + 补索引 + 灌演示数据，跑完退出 | — |
+| `app` | uvicorn，`/healthz` `/readyz` 探活 | `127.0.0.1:8000` |
+| `worker` | 常驻消费 outbox（汇总 + 缓存失效） | — |
+
+端口刻意映射成 **5433 / 6380**，和本机 `dev.cmd` 的配置一致：从本机切到容器**不用改 DSN**，
+`dev.cmd smoke -Port 8000` 也能直接打到容器里的服务。
+
+> ⚠️ **这两份文件未经本机构建验证**（这台机器没装 Docker）。CI 的 `docker` job 会
+> `docker compose config` 校验语法 + `docker build` 构建镜像 + 容器内 `import app.main`。
+> 第一次在你机器上跑如果失败，通常是这三点：① 本地 PG/Redis 已占用 5433/6380；
+> ② 镜像拉取超时；③ 极老的 Docker 不认 `depends_on: condition: service_completed_successfully`（需 compose v2）。
+
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) 两个 job：
+
+| job | 做什么 | 为什么 |
+| --- | --- | --- |
+| `test` | 起真 PG 16 + Redis 7 → 建表灌数据 → ruff → **150 用例** → **40 项 HTTP 冒烟** | 测试依赖真库的行为（条件更新、`SKIP LOCKED`、唯一约束），用 mock 等于没测 |
+| `docker` | `docker compose config` 校验 + 构建镜像 + 容器内 `import app.main` | 本机没 Docker，靠 CI 兜住"镜像能不能构建" |
+
+CI 里的 `TDP_CACHE_STRATEGY=delete`、`TDP_TZ=Asia/Shanghai` 与本地一致 ——
+**测试环境的口径必须和生产一致**，否则"本机绿、CI 红"会浪费一整晚。
 
 ### 手动开始（不想用脚本）
 
@@ -76,7 +110,7 @@ python -m pip install -r requirements-dev.txt
 & C:\Users\13741\dsh-devtools\redis\redis-server.exe C:\Users\13741\dsh-devtools\redis\redis-6380.conf
 
 python scripts/init_db.py --seed-demo     # 建库 + 建表 + 演示数据
-python -m pytest                          # 131 个用例
+python -m pytest                          # 150 个用例
 python -m uvicorn app.main:app --port 8000 --reload
 python scripts/outbox_worker.py --drain    # 把执行结果汇总成日报
 python scripts/recon.py                    # 日终对账（--strict 时有差异退出码 1）
