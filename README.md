@@ -37,7 +37,7 @@
 
 报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：201 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 85），`dev.cmd` 端到端冒烟 **44 项**。
+**当前测试规模：208 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 85），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -54,10 +54,11 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（201 个用例，真库 + Redis） |
+| `dev.cmd test` | `pytest`（208 个用例，真库 + Redis） |
 | `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
+| `dev.cmd sched` | 定时任务各跑一轮：幂等键清理 / 每日对账 / 死信巡检（`-Watch` 常驻，每 60s 检查） |
 | `dev.cmd bench` | **十项实验**：档期竞争（1000）+ 领取竞争（20）+ 提交竞争（20）+ outbox 故障注入 + 对账注入 + 缓存一致性 + 占用三方案 P99 + 深分页 + 多 worker + HTTP 层压测 |
 | `dev.cmd api -Port 8000 -Reload` | 启动服务 → <http://127.0.0.1:8000/docs> |
 | `dev.cmd token -User admin` | 打印一个 JWT（演示账号见下方「约定」） |
@@ -248,6 +249,7 @@ test-data-platform/
 ├── migrations/versions/0001_baseline.py · 0002_perf_indexes.py · 0003_app_users.py（只做版本编排）
 ├── scripts/          init_db.py（建库建表+演示数据）· api_smoke.py（真实 HTTP 冒烟）
 │                     outbox_worker.py（常驻 worker）· recon.py（对账命令行）
+│                     scheduler.py（定时任务：advisory lock 保证多副本只执行一次）
 ├── tests/            test_defect_state.py · test_defect_flow.py · test_queue_state.py
 │                     test_claim_flow.py · test_execution_flow.py · test_biz_time.py
 │                     test_outbox_worker.py · test_recon_rules.py · test_recon_flow.py
@@ -330,7 +332,10 @@ test-data-platform/
 22. **追踪用 W3C `traceparent`，且默认不导出**：格式标准才能和网关/Mesh/RUM 对接；
     默认不挂 exporter，本地和 CI 不会因为"没起 collector"变慢或报错。
     `X-Request-ID`（给人搜日志）和 `traceparent`（给追踪系统拼链路）并存，职责不同。
-23. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
+23. **定时任务用 PG 会话级 advisory lock，不是自造锁表**：锁跟着会话走，进程崩了自动释放，
+    不会留下"死锁行"要人清；`pg_try_advisory_lock` 拿不到就跳过，不把第二个副本卡住。
+    比"多引一个 Redis 锁"少一个故障面 —— 这里已经有 PG，没必要为一把锁加组件。
+24. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
     汇总 `total` 等于消息数（"重算"而不是"累加"，所以即使重复也不会多算）。
     4 个 worker × 200 条实测：0 条重复、0 差异。
 21. **迁移要能处理"老库"**：`init_db.py` 发现"有表但没有 `alembic_version`"时先 `stamp head`
@@ -379,6 +384,7 @@ test-data-platform/
 | 34 | HTTP 压测跑着跑着请求全超时，像服务卡死 | 子进程 `Popen(stdout=PIPE)` 但没人读，uvicorn 写日志把 64KB 缓冲写满后**阻塞在写日志上**。改成把日志写文件 |
 | 35 | 追踪测试里"一条 span 都没采到" | 夹具写成 `yield exporter.get_finished_spans()`，`yield` 时求值成了**空快照**。要 yield 一个取值函数 |
 | 36 | 压测的读请求全是 429，缓存命中率 0% | 默认限流 600/分钟，一次压测 600+ 请求。压测必须在拉起服务时放开 `TDP_RATE_LIMIT`，否则测的是限流器 |
+| 37 | 调度器日志写"对账完成，差异 0 条"，实际有 11 条 | 取了不存在的字段 `diff_count`（recon 返回的是 `total`），`.get()` 拿不到就默认 0 —— **假绿灯比红灯危险**。现在有差异会打 ERROR 并带上 `by_kind` |
 
 ---
 
@@ -403,6 +409,7 @@ test-data-platform/
 | ~~分布式限流~~ ✅ | `TDP_RATE_LIMIT_BACKEND=redis`：Lua 令牌桶，多副本共享；Redis 挂了降级并计数 | 配额按"每个用户"，没做租户总量 |
 | ~~429 限流~~ ✅ | 令牌桶中间件（按用户/IP 分桶、探针豁免、`Retry-After`） | 多副本要换 Redis 做全局配额 |
 | ~~认证~~ ✅ | JWT + `app_users` + 三角色（admin/tester/viewer），401/403 全覆盖 | 细粒度 ABAC（按 project_id 过滤）仍没做 |
-| ~~告警规则~~ ✅ / 调度 ❌ | `deploy/prometheus/alerts.yml` 7 条规则 + 13 面板 dashboard；worker/对账仍靠手动跑 | 缺 cron/常驻调度 |
+| ~~告警规则 / 调度~~ ✅ | 7 条告警 + 13 面板；`scripts/scheduler.py` 定时跑幂等键清理 / 每日对账 / 死信巡检，PG advisory lock 防多副本重复执行 | 任务节奏写死在代码里，没做后台可配 |
+
 | ~~ABAC~~ ✅ | 按项目隔离（13 条越权用例）；按资源 ID 操作一律反查项目 | 没做字段级权限 |
 | 缓存穿透 / 击穿 | 不存在的 key 会反复回源；热 key 过期瞬间回源 | 空值短 TTL 缓存 + 单飞重建 |

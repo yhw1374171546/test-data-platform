@@ -88,6 +88,17 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # 定时任务：幂等键清理 / 每日对账 / 死信巡检
+  # 多副本安全靠 PostgreSQL 会话级 advisory lock（进程崩了锁自动释放）
+  scheduler:
+    build: .
+    command: ["python", "scripts/scheduler.py"]
+    environment: *env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   # 监控：Prometheus 抓 /metrics，并按 alerts.yml 告警
   prometheus:
     image: prom/prometheus:v2.54.1

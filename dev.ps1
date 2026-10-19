@@ -56,7 +56,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token')]
+    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token', 'sched')]
     [string]$Action = 'all',
 
     [int]$Port = 8000,
@@ -366,6 +366,23 @@ function Invoke-Bench {
     Write-Note '注意：压测会故意注入差错，所以全量对账（dev.cmd recon）会报出这些样本 —— 那是它该做的事'
 }
 
+function Invoke-Sched {
+    Write-Step '定时任务：幂等键清理 / 每日对账 / 死信巡检'
+    Ensure-Postgres
+    if ((Get-DbStatus).Code -ne 0) {
+        Write-Warn '业务库未初始化，先跑 init'
+        Invoke-Init
+    }
+    if ($Watch) {
+        Write-Note '常驻模式：每 60s 检查一次到期任务（Ctrl+C 停止）'
+        Invoke-Python @('scripts/scheduler.py')
+    }
+    else {
+        Invoke-Python @('scripts/scheduler.py', '--once')
+        Write-Ok '三个任务各跑了一轮（advisory lock 保证多副本只执行一次）'
+    }
+}
+
 function Invoke-Worker {
     Write-Step 'outbox worker：执行结果 → 日报汇总'
     Ensure-Postgres
@@ -497,6 +514,7 @@ try {
         'api' { Invoke-Api }
         'docs' { Show-Docs }
         'token' { Invoke-Token }
+        'sched' { Invoke-Sched }
         'all' {
             Invoke-Check
             Invoke-Init
