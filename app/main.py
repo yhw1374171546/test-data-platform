@@ -16,11 +16,13 @@ import os
 import time
 from typing import Any, Dict
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 
 from app.api.admin import router as admin_router
+from app.api.auth import router as auth_router
+from app.api.authz import require_read_write, require_roles
 from app.api.bookings import router as bookings_router
 from app.api.catalog import router as catalog_router
 from app.api.context import (current_trace_id, new_trace_id, reset_trace_id,
@@ -30,7 +32,7 @@ from app.api.errors import install_error_handlers
 from app.api.executions import router as executions_router
 from app.api.jobs import router as jobs_router
 from app.api.queue import router as queue_router
-from app.infra import metrics
+from app.infra import metrics, ratelimit, tracing
 from app.infra.db import engine
 
 logger = logging.getLogger("tdp.http")
@@ -50,8 +52,11 @@ async def _observe(request: Request, call_next: Any) -> Response:
         status = response.status_code
         response.headers["X-Request-ID"] = trace_id
         return response
-    except Exception:                                   # noqa: BLE001 - 兜底
+    except Exception as exc:                            # noqa: BLE001 - 兜底
         logger.exception("未捕获异常 trace_id=%s path=%s", trace_id, request.url.path)
+        # 异常在这里被"变成 500 响应"，所以这里是唯一能拿到堆栈的地方 ——
+        # 记到当前 span 上，追踪系统里才能看到真正的失败原因。
+        tracing.record_exception(exc)
         return JSONResponse(
             {"error": "internal",
              "detail": "服务内部错误，请带上 trace_id 反馈",
@@ -71,12 +76,78 @@ async def _observe(request: Request, call_next: Any) -> Response:
         reset_trace_id(token)
 
 
+async def _trace(request: Request, call_next: Any) -> Response:
+    """链路追踪（最外层）：span 覆盖从进来到响应的全过程，并把 traceparent 回写给调用方。
+
+    为什么要回写：调用方（前端/网关/另一个服务）拿到响应头里的 traceparent，
+    下次请求带上它，就能把两次调用串成一条 trace —— 这是"跨服务排查"的入口。
+    `X-Request-ID` 和它同时存在：前者给人看（日志里能搜），后者给追踪系统拼。
+    """
+    from opentelemetry import trace as _otel_trace
+
+    parent = tracing.extract(request.headers)
+    span = tracing.tracer().start_span(
+        f"{request.method} {request.url.path}", context=parent,
+        kind=tracing.SpanKind.SERVER,
+    )
+    span.set_attribute("http.request.method", request.method)
+    span.set_attribute("url.path", request.url.path)
+    span.set_attribute("tdp.request_id", request.headers.get("X-Request-ID") or "")
+
+    status = 500
+    error = None
+    # use_span 把 span 设为"当前"，这样 tracing.inject() 才知道该回写哪条 trace
+    with _otel_trace.use_span(span, end_on_exit=False):
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            span.set_attribute("http.response.status_code", status)
+            response.headers["traceparent"] = tracing.inject({}).get("traceparent", "")
+            return response
+        except Exception as exc:                   # noqa: BLE001 - 记录后原样抛给外层
+            error = exc
+            raise
+        finally:
+            tracing.finish(span, status_code=status, error=error)
+            span.end()
+
+
+async def _rate_limit(request: Request, call_next: Any) -> Response:
+    """令牌桶限流。放在 `_observe` **里面**：这样 429 也会被计入 HTTP 指标和 trace_id。"""
+    path = request.url.path
+    if not ratelimit.enabled() or path in ratelimit.SKIP_PATHS:
+        return await call_next(request)
+
+    limiter = ratelimit.get_limiter()
+    key = ratelimit.bucket_key(request)
+    allowed, retry_after = limiter.check(key)
+    if allowed:
+        return await call_next(request)
+
+    label = ratelimit.route_label(path)
+    metrics.RATE_LIMITED.labels(route=label).inc()
+    wait = max(1, int(retry_after + 0.999))          # 向上取整：宁可多等 1 秒也别打空
+    logger.warning("限流命中 path=%s bucket=%s retry_after=%ss", label, key, wait)
+    return JSONResponse(
+        {"error": "rate_limited",
+         "detail": {"limit": limiter.limit, "window_seconds": limiter.window,
+                    "retry_after": wait,
+                    "hint": "请按 Retry-After 退避；不要原速率重试"},
+         "trace_id": current_trace_id()},
+        status_code=429,
+        headers={"Retry-After": str(wait),
+                 "X-RateLimit-Limit": str(limiter.limit),
+                 "X-RateLimit-Remaining": "0"},
+    )
+
+
 def create_app() -> FastAPI:
     logging.basicConfig(
         level=os.environ.get("TDP_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    tracing.setup()                      # 幂等；没配 OTLP 端点就只在进程内用 span
     app = FastAPI(
         title="测试数据管理平台",
         version=VERSION,
@@ -88,15 +159,25 @@ def create_app() -> FastAPI:
     )
 
     install_error_handlers(app)
+    # 中间件顺序：先 add 的在**内层**。所以实际链路是
+    #   tracing(最外) → trace_id/指标 → 限流 → 路由
+    # 限流在最内层的业务之前，但 trace_id 和指标已经生效（429 也能被观测到）。
+    app.middleware("http")(_rate_limit)
     app.middleware("http")(_observe)
+    app.middleware("http")(_trace)          # 最后 add = 最外层
 
-    app.include_router(bookings_router)
-    app.include_router(defects_router)
-    app.include_router(queue_router)
-    app.include_router(executions_router)
-    app.include_router(jobs_router)
-    app.include_router(admin_router)
-    app.include_router(catalog_router)
+    # 认证：只有 /v1/auth/token 是公开的（否则没法冷启动换 token）。
+    # 其余按"路由器"粗粒度授权 —— 一个路由器的读写通常是同一类人，
+    # 细分到单条路由的权限（比如"只读用户能看问题单但不能提"）属于下一步的 ABAC。
+    app.include_router(auth_router)
+    app.include_router(catalog_router, dependencies=[Depends(require_read_write())])
+    app.include_router(bookings_router, dependencies=[Depends(require_read_write())])
+    app.include_router(defects_router, dependencies=[Depends(require_read_write())])
+    app.include_router(queue_router, dependencies=[Depends(require_read_write())])
+    app.include_router(executions_router, dependencies=[Depends(require_read_write())])
+    # 汇总 / 对账 / 死信重放会影响全库数据，只给管理员
+    app.include_router(jobs_router, dependencies=[Depends(require_roles("admin"))])
+    app.include_router(admin_router, dependencies=[Depends(require_roles("admin"))])
 
     @app.get("/healthz", tags=["ops"], summary="存活探针（不查库）")
     def healthz() -> Dict[str, str]:

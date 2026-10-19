@@ -11,19 +11,11 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.infra.db import session_scope
-from app.main import create_app
 
-
-@pytest.fixture()
-def client(refs: Dict[str, Any]):
-    # raise_server_exceptions=False：让 500 也走中间件，才能真正断言错误体形状
-    with TestClient(create_app(), raise_server_exceptions=False) as c:
-        yield c
 
 
 def _body(resp) -> Any:

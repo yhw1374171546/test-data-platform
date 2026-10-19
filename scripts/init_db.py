@@ -27,6 +27,7 @@ from alembic import command as alembic_command             # noqa: E402
 from alembic.config import Config as AlembicConfig          # noqa: E402
 from psycopg.conninfo import conninfo_to_dict, make_conninfo  # noqa: E402
 
+from app.infra.auth import hash_password                     # noqa: E402
 from app.infra.db import DATABASE_URL                        # noqa: E402
 
 # ── 演示数据（全部来自"整车测试"这个真实场景，不是 foo/bar）──
@@ -46,6 +47,14 @@ DEMO_CASES = [
     ("TC-NOA-0103", "领航", "城市 NOA 施工区绕行", "P1"),
     ("TC-PARK-0201", "泊车", "记忆泊车跨层寻位", "P1"),
     ("TC-HMI-0301", "HMI", "NOA 激活失败提示语", "P2"),
+]
+
+# 演示账号：**只用于本地/演示环境**，生产必须改口令。
+# 三个角色刚好覆盖权限矩阵：admin 能重放死信、tester 能写业务、viewer 只能读。
+DEMO_USERS = [
+    ("admin", "Admin@12345", "admin"),
+    ("tester", "Tester@12345", "tester"),
+    ("viewer", "Viewer@12345", "viewer"),
 ]
 
 
@@ -178,6 +187,18 @@ def seed_demo(dsn: str) -> Dict[str, int]:
                     ON CONFLICT (project_id, version_id, case_id) DO NOTHING
                 """, (pid, vid, cid))
 
+        # 演示账号：口令用 PBKDF2 哈希入库（绝不存明文）。
+        # 重复执行会重置口令——这正是"忘了密码就跑一次 init"的用法。
+        for username, password, role in DEMO_USERS:
+            conn.execute("""
+                INSERT INTO app_users (username, password_hash, role, active)
+                VALUES (%s, %s, %s, TRUE)
+                ON CONFLICT (username) DO UPDATE
+                   SET password_hash = EXCLUDED.password_hash,
+                       role = EXCLUDED.role,
+                       active = TRUE
+            """, (username, hash_password(password), role))
+
         stats = {
             "projects": _scalar(conn, "SELECT count(*) FROM projects"),
             "vehicles": _scalar(conn, "SELECT count(*) FROM vehicles"),
@@ -185,6 +206,7 @@ def seed_demo(dsn: str) -> Dict[str, int]:
             "testers": _scalar(conn, "SELECT count(*) FROM testers"),
             "test_cases": _scalar(conn, "SELECT count(*) FROM test_cases"),
             "execution_queue": _scalar(conn, "SELECT count(*) FROM execution_queue"),
+            "app_users": _scalar(conn, "SELECT count(*) FROM app_users"),
         }
         conn.commit()
     return stats

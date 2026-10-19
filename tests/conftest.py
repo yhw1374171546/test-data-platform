@@ -190,3 +190,47 @@ def make_testers(refs: Dict[str, Any]) -> Callable[..., List[int]]:
         return ids
 
     return _make
+
+
+# ────────────────────────── HTTP 客户端（带 / 不带 token）──────────────────────────
+# 认证默认是开的（TDP_AUTH=on），所以业务用例的客户端必须带 token，否则全是 401。
+# 这里直接签发 token 而不是走 /v1/auth/token：省一次 DB 往返，也让"认证测试"和
+# "业务测试"解耦 —— 登录流程本身由 tests/test_auth.py 单独验。
+def _make_client(role: str | None):
+    from fastapi.testclient import TestClient
+
+    from app.infra.auth import issue_token
+    from app.main import create_app
+
+    headers = {}
+    if role:
+        token, _ = issue_token(f"pytest-{role}", role, ttl_seconds=600)
+        headers["Authorization"] = f"Bearer {token}"
+    # raise_server_exceptions=False：让 500 也走中间件，才能真正断言错误体形状
+    return TestClient(create_app(), raise_server_exceptions=False, headers=headers)
+
+
+@pytest.fixture()
+def client(refs: Dict[str, Any]):
+    """默认客户端：admin 身份（绝大多数用例只关心业务行为）。"""
+    with _make_client("admin") as c:
+        yield c
+
+
+@pytest.fixture()
+def tester_client(refs: Dict[str, Any]):
+    with _make_client("tester") as c:
+        yield c
+
+
+@pytest.fixture()
+def viewer_client(refs: Dict[str, Any]):
+    with _make_client("viewer") as c:
+        yield c
+
+
+@pytest.fixture()
+def anon_client(refs: Dict[str, Any]):
+    """不带 token 的客户端，用来验 401 / 限流（限流按来源分桶，匿名更干净）。"""
+    with _make_client(None) as c:
+        yield c

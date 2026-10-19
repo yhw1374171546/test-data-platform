@@ -30,6 +30,7 @@ from app.service.booking import (BookingNotCancellable, BookingNotFound,
                                  RefNotFound, SlotNotAvailable)
 from app.service.claim import QueueConflict, QueueTaskNotFound
 from app.service.defect import (BadCursor, DefectNotFound, StateConflict)
+from app.service.users import AuthFailed
 
 logger = logging.getLogger("tdp.error")
 
@@ -105,6 +106,13 @@ def translate_domain_errors() -> Iterator[None]:
                        {"status": exc.status, "known": list(QUEUE_STATUSES)}) from exc
     except BadCursor as exc:
         raise AppError(400, "invalid_cursor", {"reason": str(exc)}) from exc
+    except AuthFailed as exc:
+        # 统一成 invalid_credentials：不告诉调用方"用户不存在"还是"密码错"，
+        # 否则这个接口就是用户名枚举器。具体原因只写日志。
+        if exc.reason == "bad_request":
+            raise AppError(400, "invalid_argument", {"reason": exc.detail}) from exc
+        raise AppError(401, "invalid_credentials",
+                       {"reason": "用户名或密码不正确"}) from exc
     except ValueError as exc:                 # 日期/半天等入参解析失败
         raise AppError(400, "invalid_argument", {"reason": str(exc)}) from exc
 

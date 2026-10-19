@@ -19,6 +19,20 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# ────────────────────────── 认证 ──────────────────────────
+class TokenRequest(StrictModel):
+    username: str = Field(min_length=1, max_length=64, description="账号")
+    password: str = Field(min_length=1, max_length=128, description="口令")
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int = Field(description="有效期秒数")
+    username: str
+    role: str = Field(description="admin | tester | viewer")
+
+
 # ────────────────────────── 预约 ──────────────────────────
 class BookingCreate(StrictModel):
     project_id: int = Field(gt=0, description="项目 ID")
