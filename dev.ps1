@@ -56,7 +56,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token', 'sched', 'web')]
+    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token', 'sched', 'web', 'prod-check')]
     [string]$Action = 'all',
 
     [int]$Port = 8000,
@@ -366,6 +366,12 @@ function Invoke-Bench {
     Write-Note '注意：压测会故意注入差错，所以全量对账（dev.cmd recon）会报出这些样本 —— 那是它该做的事'
 }
 
+function Invoke-ProdCheck {
+    Write-Step '上线自检：把公网上会出事的默认值逐条查出来'
+    $env:PYTHONUTF8 = '1'
+    Invoke-Python @('scripts/prod_check.py', '--base-url', 'http://127.0.0.1:8000')
+}
+
 function Invoke-Web {
     Write-Step '前端：安装依赖 + 构建（产物 web/dist 由后端挂在 /ui）'
     $node = Get-Command node -ErrorAction SilentlyContinue
@@ -547,6 +553,7 @@ try {
         'token' { Invoke-Token }
         'sched' { Invoke-Sched }
         'web' { Invoke-Web }
+        'prod-check' { Invoke-ProdCheck }
         'all' {
             Invoke-Check
             Invoke-Init

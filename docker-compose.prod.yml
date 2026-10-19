@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────
+# 生产编排：只暴露一个端口（127.0.0.1:8000），由 Nginx 反代
+#
+# 与开发版 docker-compose.yml 的三点差别：
+#   1. Postgres / Redis **不映射端口**（开发版把 5433 暴露到公网就是事故）；
+#   2. 全部 restart: unless-stopped，机器重启后自己起来；
+#   3. 密钥全部走 .env，镜像里不留任何默认值。
+#
+# 用法：
+#   cp .env.example .env && 编辑 .env（至少改 TDP_JWT_SECRET）
+#   docker compose -f docker-compose.prod.yml up -d --build
+# ─────────────────────────────────────────────────────────────
+name: tdp-prod
+
+x-app-env: &app-env
+  TDP_DATABASE_URL: postgresql+psycopg://tdp:${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}@postgres:5432/tdp
+  TDP_REDIS_URL: redis://redis:6379/0
+  TDP_JWT_SECRET: ${TDP_JWT_SECRET:?必须设置 TDP_JWT_SECRET（至少 32 位随机串）}
+  TDP_AUTH: "on"
+  TDP_RATE_LIMIT: ${TDP_RATE_LIMIT:-600}
+  TDP_RATE_LIMIT_WINDOW: ${TDP_RATE_LIMIT_WINDOW:-60}
+  TDP_RATE_LIMIT_BACKEND: redis
+  TDP_LOG_LEVEL: ${TDP_LOG_LEVEL:-INFO}
+  TDP_OTLP_ENDPOINT: ${TDP_OTLP_ENDPOINT:-}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: tdp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: tdp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tdp -d tdp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["python", "scripts/init_db.py", "--seed-demo"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    environment: *app-env
+    # 只绑本机回环：外网进不来，必须经过 Nginx
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2).status == 200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+  worker:
+    build: .
+    command: ["python", "scripts/outbox_worker.py", "--interval", "2"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    command: ["python", "scripts/scheduler.py"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:

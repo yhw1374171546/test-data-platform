@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 from typing import Any, Dict, List
@@ -56,6 +57,22 @@ DEMO_USERS = [
     ("tester", "Tester@12345", "tester"),
     ("viewer", "Viewer@12345", "viewer"),
 ]
+
+
+def demo_users() -> list[tuple[str, str, str]]:
+    """演示账号清单；线上用环境变量补一个"只读演示账号"。
+
+    `TDP_DEMO_USER` / `TDP_DEMO_PASSWORD` 只创建一个 **viewer** 账号：
+    面试官/HR 能点开三个页面看数据，但改不了任何东西（写操作会被 403）。
+    这比给 admin 安全得多 —— 公网上谁都能点的 admin 等于没有权限。
+    """
+    users = list(DEMO_USERS)
+    username = (os.environ.get("TDP_DEMO_USER") or "").strip()
+    password = (os.environ.get("TDP_DEMO_PASSWORD") or "").strip()
+    if username and password:
+        users = [u for u in users if u[0] != username]
+        users.append((username, password, "viewer"))
+    return users
 
 
 def to_libpq(dsn: str) -> str:
@@ -189,7 +206,7 @@ def seed_demo(dsn: str) -> Dict[str, int]:
 
         # 演示账号：口令用 PBKDF2 哈希入库（绝不存明文）。
         # 重复执行会重置口令——这正是"忘了密码就跑一次 init"的用法。
-        for username, password, role in DEMO_USERS:
+        for username, password, role in demo_users():
             conn.execute("""
                 INSERT INTO app_users (username, password_hash, role, active)
                 VALUES (%s, %s, %s, TRUE)
@@ -201,7 +218,7 @@ def seed_demo(dsn: str) -> Dict[str, int]:
 
         # ABAC：把非管理员演示账号加进演示项目。
         # admin 不需要成员关系（管理员直通），这本身也是一条可讲的权限设计。
-        for username, _password, role in DEMO_USERS:
+        for username, _password, role in demo_users():
             if role == "admin":
                 continue
             conn.execute("""

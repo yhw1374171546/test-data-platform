@@ -35,10 +35,11 @@
 | 6 | **占用方案 P99** + **50 万条 keyset 深分页** + 性能索引迁移 | ✅ | **A/B/C 正确性一致（恰好 1 人成功）；P99 A 269ms / B 275ms / C 25ms（DB 语句 603→9）；分页第 25000 页 OFFSET 148ms vs keyset 1.2ms（128x）；带 project 过滤时浅页 113ms→1.5ms，靠复合索引** |
 | 7 | **认证 / 限流 / 链路追踪 / 监控**（工程化补充） | ✅ | **401/403/429 全部有测试；JWT 角色矩阵（viewer/tester/admin）9 条；令牌桶 429 带 Retry-After；W3C traceparent 可透传、5xx 记 ERROR；Prometheus 7 条告警 + Grafana 13 面板** |
 | 8 | **前端（Vue3 + Element Plus）** | ✅ | **3 个页面 + 登录**：档期预约 / 任务领取 / 日报看板；同源挂在 `/ui`（Vite 构建产物），登录走 JWT，截图见 `docs/screenshots/` |
+| 9 | **部署（Docker Compose 上线）** | ✅ | 两阶段 Dockerfile（含前端构建）、prod 编排（DB/Redis 不映射端口、app 只绑回环）、Nginx 反代 + `/metrics` 限本机、**只读演示账号**、`scripts/prod_check.py` 上线自检、`deploy/deploy.sh` 一键部署；见 `docs/部署.md` |
 
 报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：213 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 90），`dev.cmd` 端到端冒烟 **44 项**。
+**当前测试规模：218 个**（纯函数 42 + 落库/集成 79 + HTTP 契约 92），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -55,12 +56,13 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（213 个用例，真库 + Redis） |
+| `dev.cmd test` | `pytest`（218 个用例，真库 + Redis） |
 | `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
 | `dev.cmd sched` | 定时任务各跑一轮：幂等键清理 / 每日对账 / 死信巡检（`-Watch` 常驻，每 60s 检查） |
 | `dev.cmd web` | 安装依赖 + 构建前端，产物由后端挂在 `/ui`（打开 http://127.0.0.1:8000/ui/） |
+| `dev.cmd prod-check` | 上线自检：JWT 密钥/数据库口令/认证开关/限流后端/默认 admin 口令/只读演示账号 |
 | `dev.cmd bench` | **十项实验**：档期竞争（1000）+ 领取竞争（20）+ 提交竞争（20）+ outbox 故障注入 + 对账注入 + 缓存一致性 + 占用三方案 P99 + 深分页 + 多 worker + HTTP 层压测 |
 | `dev.cmd api -Port 8000 -Reload` | 启动服务 → <http://127.0.0.1:8000/docs> |
 | `dev.cmd token -User admin` | 打印一个 JWT（演示账号见下方「约定」） |
@@ -246,6 +248,11 @@ test-data-platform/
 │   │                 auth.py（口令哈希 + JWT）· ratelimit.py（令牌桶）· tracing.py（OTel）
 │   └── main.py       中间件（trace_id + 指标）→ 路由 → 运维端点
 ├── alembic.ini · migrations/env.py（不做 autogenerate：表是手写 SQL）
+├── deploy/
+│   ├── nginx/tdp.conf         反代 + /metrics 只允许本机
+│   ├── prometheus/            抓取配置 + 7 条告警规则
+│   ├── grafana/               数据源/面板 provisioning + 13 面板 dashboard
+│   └── deploy.sh              服务器上一键：检查 .env → 启动 → 等就绪 → 自检
 ├── web/                       前端（Vue3 + Vite + Element Plus）
 │   ├── src/views/             档期预约 · 任务领取 · 日报看板 · 登录
 │   └── dist/                  构建产物（不入库，dev.cmd web 生成）
