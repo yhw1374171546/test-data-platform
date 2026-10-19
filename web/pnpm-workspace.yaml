@@ -1,0 +1,4 @@
+# pnpm 11 的构建脚本白名单放在这里（package.json 里的 pnpm 字段已不再读取）。
+# esbuild 需要跑 postinstall 安装平台二进制，否则 vite build 会失败。
+allowBuilds:
+  esbuild: true

@@ -56,7 +56,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token', 'sched')]
+    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token', 'sched', 'web')]
     [string]$Action = 'all',
 
     [int]$Port = 8000,
@@ -366,6 +366,37 @@ function Invoke-Bench {
     Write-Note '注意：压测会故意注入差错，所以全量对账（dev.cmd recon）会报出这些样本 —— 那是它该做的事'
 }
 
+function Invoke-Web {
+    Write-Step '前端：安装依赖 + 构建（产物 web/dist 由后端挂在 /ui）'
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) {
+        Write-Warn '没找到 node，跳过前端构建（后端仍可用，只是 /ui 打不开）'
+        return
+    }
+    # 优先 pnpm，其次 npm（命令行兼容）
+    $pkg = $null
+    if (Get-Command pnpm -ErrorAction SilentlyContinue) { $pkg = 'pnpm' }
+    elseif (Get-Command npm -ErrorAction SilentlyContinue) { $pkg = 'npm' }
+    if (-not $pkg) {
+        Write-Warn '没找到 pnpm / npm，跳过前端构建'
+        return
+    }
+    Push-Location (Join-Path $PSScriptRoot 'web')
+    try {
+        if (-not (Test-Path 'node_modules')) {
+            Write-Note "首次安装依赖（$pkg install，约 1 分钟）"
+            & $pkg install
+            if ($LASTEXITCODE -ne 0) { Write-Warn '依赖安装失败，检查 node / pnpm 是否可用'; return }
+        }
+        & $pkg build
+        if ($LASTEXITCODE -ne 0) { Write-Warn '构建失败'; return }
+    }
+    finally {
+        Pop-Location
+    }
+    Write-Ok '前端已构建：启动后端后打开 http://127.0.0.1:8000/ui/'
+}
+
 function Invoke-Sched {
     Write-Step '定时任务：幂等键清理 / 每日对账 / 死信巡检'
     Ensure-Postgres
@@ -515,6 +546,7 @@ try {
         'docs' { Show-Docs }
         'token' { Invoke-Token }
         'sched' { Invoke-Sched }
+        'web' { Invoke-Web }
         'all' {
             Invoke-Check
             Invoke-Init

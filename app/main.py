@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, Request
@@ -31,6 +32,7 @@ from app.api.defects import router as defects_router
 from app.api.errors import install_error_handlers
 from app.api.executions import router as executions_router
 from app.api.jobs import router as jobs_router
+from app.api.meta import router as meta_router
 from app.api.queue import router as queue_router
 from app.infra import metrics, ratelimit, tracing
 from app.infra.db import engine
@@ -170,6 +172,7 @@ def create_app() -> FastAPI:
     # 其余按"路由器"粗粒度授权 —— 一个路由器的读写通常是同一类人，
     # 细分到单条路由的权限（比如"只读用户能看问题单但不能提"）属于下一步的 ABAC。
     app.include_router(auth_router)
+    app.include_router(meta_router, dependencies=[Depends(require_read_write())])
     app.include_router(catalog_router, dependencies=[Depends(require_read_write())])
     app.include_router(bookings_router, dependencies=[Depends(require_read_write())])
     app.include_router(defects_router, dependencies=[Depends(require_read_write())])
@@ -178,6 +181,14 @@ def create_app() -> FastAPI:
     # 汇总 / 对账 / 死信重放会影响全库数据，只给管理员
     app.include_router(jobs_router, dependencies=[Depends(require_roles("admin"))])
     app.include_router(admin_router, dependencies=[Depends(require_roles("admin"))])
+
+    # 前端构建产物（web/dist）：有就挂到 /ui，没有就只提供 API。
+    # 同源部署，所以不需要给浏览器开 CORS。
+    web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"
+    if web_dist.is_dir():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/ui", StaticFiles(directory=str(web_dist), html=True), name="ui")
 
     @app.get("/healthz", tags=["ops"], summary="存活探针（不查库）")
     def healthz() -> Dict[str, str]:
@@ -214,6 +225,7 @@ def create_app() -> FastAPI:
             "service": SERVICE,
             "version": VERSION,
             "docs": "/docs",
+            "ui": "/ui/",
             "health": ["/healthz", "/readyz"],
             "endpoints": [
                 "POST /v1/bookings",

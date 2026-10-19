@@ -1,4 +1,4 @@
-# ── Python ──
+# 鈹€鈹€ Python 鈹€鈹€
 __pycache__/
 *.pyc
 .venv/
@@ -9,7 +9,7 @@ __pycache__/
 coverage.xml
 htmlcov/
 
-# ── 本地数据 / 运行时产物 ──
+# 鈹€鈹€ 鏈湴鏁版嵁 / 杩愯鏃朵骇鐗?鈹€鈹€
 *.db
 *.db-shm
 *.db-wal
@@ -17,8 +17,12 @@ pgdata/
 *.log
 .env
 
-# ── 编辑器 / 系统 ──
+# 鈹€鈹€ 缂栬緫鍣?/ 绯荤粺 鈹€鈹€
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 前端（依赖与构建产物都不入库，构建靠 dev.cmd web）
+web/node_modules/
+web/dist/

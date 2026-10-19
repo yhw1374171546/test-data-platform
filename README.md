@@ -34,10 +34,11 @@
 | 5 | **缓存一致性**：A 同步删 / B 延迟双删 / C 消息驱动 + **负对照** + 批量消费 | ✅ | **负对照脏读 99.65%（证明能测出）；A 1.72% / B 4.30% / C 10.12%（C 的窗口=消费延迟，有界且不丢）；TTL 兜底后全部收敛** |
 | 6 | **占用方案 P99** + **50 万条 keyset 深分页** + 性能索引迁移 | ✅ | **A/B/C 正确性一致（恰好 1 人成功）；P99 A 269ms / B 275ms / C 25ms（DB 语句 603→9）；分页第 25000 页 OFFSET 148ms vs keyset 1.2ms（128x）；带 project 过滤时浅页 113ms→1.5ms，靠复合索引** |
 | 7 | **认证 / 限流 / 链路追踪 / 监控**（工程化补充） | ✅ | **401/403/429 全部有测试；JWT 角色矩阵（viewer/tester/admin）9 条；令牌桶 429 带 Retry-After；W3C traceparent 可透传、5xx 记 ERROR；Prometheus 7 条告警 + Grafana 13 面板** |
+| 8 | **前端（Vue3 + Element Plus）** | ✅ | **3 个页面 + 登录**：档期预约 / 任务领取 / 日报看板；同源挂在 `/ui`（Vite 构建产物），登录走 JWT，截图见 `docs/screenshots/` |
 
 报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：208 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 85），`dev.cmd` 端到端冒烟 **44 项**。
+**当前测试规模：213 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 90），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -54,11 +55,12 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（208 个用例，真库 + Redis） |
+| `dev.cmd test` | `pytest`（213 个用例，真库 + Redis） |
 | `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
 | `dev.cmd sched` | 定时任务各跑一轮：幂等键清理 / 每日对账 / 死信巡检（`-Watch` 常驻，每 60s 检查） |
+| `dev.cmd web` | 安装依赖 + 构建前端，产物由后端挂在 `/ui`（打开 http://127.0.0.1:8000/ui/） |
 | `dev.cmd bench` | **十项实验**：档期竞争（1000）+ 领取竞争（20）+ 提交竞争（20）+ outbox 故障注入 + 对账注入 + 缓存一致性 + 占用三方案 P99 + 深分页 + 多 worker + HTTP 层压测 |
 | `dev.cmd api -Port 8000 -Reload` | 启动服务 → <http://127.0.0.1:8000/docs> |
 | `dev.cmd token -User admin` | 打印一个 JWT（演示账号见下方「约定」） |
@@ -244,6 +246,9 @@ test-data-platform/
 │   │                 auth.py（口令哈希 + JWT）· ratelimit.py（令牌桶）· tracing.py（OTel）
 │   └── main.py       中间件（trace_id + 指标）→ 路由 → 运维端点
 ├── alembic.ini · migrations/env.py（不做 autogenerate：表是手写 SQL）
+├── web/                       前端（Vue3 + Vite + Element Plus）
+│   ├── src/views/             档期预约 · 任务领取 · 日报看板 · 登录
+│   └── dist/                  构建产物（不入库，dev.cmd web 生成）
 ├── migrations/sql/001_baseline.sql · 002_perf_indexes.sql · 003_app_users.sql
 │                     004_project_members.sql（DDL 单一来源）
 ├── migrations/versions/0001_baseline.py · 0002_perf_indexes.py · 0003_app_users.py（只做版本编排）
@@ -332,10 +337,11 @@ test-data-platform/
 22. **追踪用 W3C `traceparent`，且默认不导出**：格式标准才能和网关/Mesh/RUM 对接；
     默认不挂 exporter，本地和 CI 不会因为"没起 collector"变慢或报错。
     `X-Request-ID`（给人搜日志）和 `traceparent`（给追踪系统拼链路）并存，职责不同。
-23. **定时任务用 PG 会话级 advisory lock，不是自造锁表**：锁跟着会话走，进程崩了自动释放，
+23. **前端同源部署，不给浏览器开 CORS**：Vite 构建产物由 FastAPI 挂在 `/ui`，接口和页面同一个 origin；开发时用 Vite 的 `server.proxy` 把 `/v1` 转发到 8000。另外支持 `?token=` 直接进页面 —— 截图、演示、给面试官发链接都不用现场登录。
+24. **定时任务用 PG 会话级 advisory lock，不是自造锁表**：锁跟着会话走，进程崩了自动释放，
     不会留下"死锁行"要人清；`pg_try_advisory_lock` 拿不到就跳过，不把第二个副本卡住。
     比"多引一个 Redis 锁"少一个故障面 —— 这里已经有 PG，没必要为一把锁加组件。
-24. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
+25. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
     汇总 `total` 等于消息数（"重算"而不是"累加"，所以即使重复也不会多算）。
     4 个 worker × 200 条实测：0 条重复、0 差异。
 21. **迁移要能处理"老库"**：`init_db.py` 发现"有表但没有 `alembic_version`"时先 `stamp head`
@@ -385,6 +391,9 @@ test-data-platform/
 | 35 | 追踪测试里"一条 span 都没采到" | 夹具写成 `yield exporter.get_finished_spans()`，`yield` 时求值成了**空快照**。要 yield 一个取值函数 |
 | 36 | 压测的读请求全是 429，缓存命中率 0% | 默认限流 600/分钟，一次压测 600+ 请求。压测必须在拉起服务时放开 `TDP_RATE_LIMIT`，否则测的是限流器 |
 | 37 | 调度器日志写"对账完成，差异 0 条"，实际有 11 条 | 取了不存在的字段 `diff_count`（recon 返回的是 `total`），`.get()` 拿不到就默认 0 —— **假绿灯比红灯危险**。现在有差异会打 ERROR 并带上 `by_kind` |
+| 38 | 前端挂到 `/ui` 后整页白屏 | Vite 默认 `base: "/"`，构建出来的 index.html 去请求 `/assets/*.js`（404）。改成 `base: "/ui/"` 才对得上挂载路径 |
+| 39 | `pnpm install` 报 `ERR_PNPM_IGNORED_BUILDS`，装完 esbuild 却构建失败 | pnpm 10+ 默认不跑依赖的 postinstall，必须显式允许（pnpm 11 写在 `pnpm-workspace.yaml` 的 `allowBuilds`）。esbuild 不跑就缺平台二进制 |
+| 40 | 日报接口带 `project_id` 就 500 | `:pid IS NULL OR ...` 里裸参数没有类型，PG 推断不出来；写成 `CAST(:pid AS BIGINT) IS NULL` 才行（可空 int 参数的老坑） |
 
 ---
 
