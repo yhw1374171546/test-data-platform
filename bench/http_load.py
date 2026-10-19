@@ -18,6 +18,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -66,15 +67,26 @@ def percentile(values: List[float], q: float) -> float:
     return ordered[min(len(ordered) - 1, int(len(ordered) * q))]
 
 
+_LOG_HANDLES: List[Any] = []      # 保持日志文件句柄存活，进程结束再统一关
+
+
 def start_server() -> Tuple[subprocess.Popen, str]:
     port = free_port()
     env = dict(os.environ)
     env.setdefault("PYTHONUTF8", "1")
+    # 压测要绕过限流：默认配额 600/分钟，而这里一次跑 600+ 请求，
+    # 不放开的话测出来的是"限流器多快"，不是"接口多快"（第一版就踩了：读全是 429）。
+    env["TDP_RATE_LIMIT"] = os.environ.get("TDP_HTTP_BENCH_RATE_LIMIT", "1000000")
+    # 日志必须落到文件，不能用 PIPE：PIPE 没人读，缓冲区（约 64KB）写满后
+    # uvicorn 会阻塞在写日志上，请求直接超时 —— 这个坑排查起来像"服务卡死"。
+    log_path = Path(tempfile.gettempdir()) / f"tdp-http-load-{port}.log"
+    log_file = log_path.open("w+", encoding="utf-8")
+    _LOG_HANDLES.append((log_file, log_path))
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
         cwd=str(BASE), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdout=log_file, stderr=subprocess.STDOUT, text=True,
     )
     base_url = f"http://127.0.0.1:{port}"
     deadline = time.perf_counter() + 30
@@ -85,13 +97,24 @@ def start_server() -> Tuple[subprocess.Popen, str]:
         except Exception:                              # noqa: BLE001 - 还没起来就重试
             time.sleep(0.2)
         if proc.poll() is not None:
-            out = proc.stdout.read() if proc.stdout else ""
-            raise RuntimeError(f"uvicorn 启动失败：{out[:500]}")
+            log_file.flush()
+            log_file.seek(0)
+            raise RuntimeError(f"uvicorn 启动失败：{log_file.read()[-1500:]}")
     raise RuntimeError("uvicorn 30s 内没起来")
 
 
+def login(base_url: str, username: str, password: str) -> str:
+    """接口默认要认证；没有 token 的压测全是 401，数字毫无意义。"""
+    resp = httpx.post(f"{base_url}/v1/auth/token", timeout=10,
+                      json={"username": username, "password": password})
+    if resp.status_code != 200:
+        raise SystemExit(f"登录失败（{resp.status_code}）：{resp.text[:200]}\n"
+                         f"  先跑 `dev.cmd init` 灌演示账号，或用 --username/--password 指定")
+    return f"Bearer {resp.json()['access_token']}"
+
+
 def http_race(base_url: str, env: Dict[str, int], day: date,
-              concurrency: int) -> Dict[str, Any]:
+              concurrency: int, token: str = "") -> Dict[str, Any]:
     """N 个线程同时 POST /v1/bookings 抢同一个档期。"""
     latencies: List[float] = []
     codes: Dict[str, int] = {}
@@ -109,7 +132,8 @@ def http_race(base_url: str, env: Dict[str, int], day: date,
             try:
                 resp = client.post(
                     f"{base_url}/v1/bookings",
-                    headers={"Idempotency-Key": f"http-bench-{uuid.uuid4().hex}"},
+                    headers={"Idempotency-Key": f"http-bench-{uuid.uuid4().hex}",
+                             **({"Authorization": token} if token else {})},
                     json={"project_id": env["project_id"], "vehicle_id": env["vehicle_id"],
                           "testers_id": env["tester_id"], "slot_date": str(day),
                           "half": 0},
@@ -178,9 +202,12 @@ def service_race(env: Dict[str, int], day: date, concurrency: int) -> Dict[str, 
             "rps": concurrency / wall if wall else 0.0}
 
 
-def http_reads(base_url: str, vin: str, total: int, concurrency: int) -> Dict[str, Any]:
+def http_reads(base_url: str, vin: str, total: int, concurrency: int,
+               token: str = "") -> Dict[str, Any]:
     """预热后并发读车辆详情：验证缓存命中 + 量一下 HTTP 读的 P99。"""
-    warm = httpx.get(f"{base_url}/v1/vehicles/{vin}", timeout=10)
+    warm = httpx.get(
+        f"{base_url}/v1/vehicles/{vin}", timeout=10,
+        headers={"Authorization": token} if token else {}, )
     latencies: List[float] = []
     cache_headers: Dict[str, int] = {}
     errors = 0
@@ -192,7 +219,9 @@ def http_reads(base_url: str, vin: str, total: int, concurrency: int) -> Dict[st
         local_lat: List[float] = []
         local_cache: Dict[str, int] = {}
         bad = 0
-        with httpx.Client(timeout=30, trust_env=False) as client:
+        client_headers = {"Authorization": token} if token else {}
+        with httpx.Client(timeout=30, trust_env=False,
+                          headers=client_headers) as client:
             for _ in range(per_thread):
                 started = time.perf_counter()
                 try:
@@ -228,6 +257,8 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=50, help="抢档期的并发线程数")
     ap.add_argument("--reads", type=int, default=2000, help="缓存读的总次数")
     ap.add_argument("--base-url", default=None, help="打已有服务；不传就自己起 uvicorn")
+    ap.add_argument("--username", default=os.environ.get("TDP_SMOKE_USER", "admin"))
+    ap.add_argument("--password", default=os.environ.get("TDP_SMOKE_PASSWORD", "Admin@12345"))
     args = ap.parse_args()
 
     print("=" * 78)
@@ -243,6 +274,9 @@ def main() -> int:
             proc, base_url = start_server()
             print(f"已启动临时 uvicorn：{base_url}")
 
+        token = login(base_url, args.username, args.password)
+        print(f"已登录：{args.username}")
+
         day = date(2032, 3, 1)
 
         # ── 写：同一档期 N 并发 ──
@@ -253,7 +287,7 @@ def main() -> int:
 
         http_day = date(2032, 3, 2)
         env_http = seed(http_day)
-        http = http_race(base_url, env_http, http_day, args.concurrency)
+        http = http_race(base_url, env_http, http_day, args.concurrency, token)
         print(f"[HTTP 层]    同一档期 {args.concurrency} 并发：{http['codes']}  "
               f"耗时 {http['wall']:.2f}s  {http['rps']:.0f} req/s")
 
@@ -265,7 +299,7 @@ def main() -> int:
             vin = str(s.execute(text(
                 "SELECT vin FROM vehicles WHERE id = :v"),
                 {"v": env_http["vehicle_id"]}).scalar_one())
-        reads = http_reads(base_url, vin, args.reads, min(args.concurrency, 50))
+        reads = http_reads(base_url, vin, args.reads, min(args.concurrency, 50), token)
 
         print("\n" + "=" * 78)
         print("结果")

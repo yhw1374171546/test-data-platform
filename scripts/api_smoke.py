@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 import uuid
@@ -103,6 +104,36 @@ def run(args: argparse.Namespace) -> int:
     print("=" * 74)
 
     with httpx.Client(base_url=args.base_url, timeout=15.0) as client:
+        # ── 认证（技术方案：接口默认需要 Bearer token）──
+        c.section("认证")
+        anon = client.get("/v1/defects")
+        c.check("不带 token 访问业务接口 → 401",
+                anon.status_code == 401
+                and (anon.json() or {}).get("error") == "unauthorized_missing",
+                anon.text[:80])
+
+        bad = client.post("/v1/auth/token",
+                          json={"username": args.username, "password": "wrong-password"})
+        c.check("口令错 → 401 且不泄露用户是否存在",
+                bad.status_code == 401
+                and (bad.json() or {}).get("error") == "invalid_credentials",
+                bad.text[:80])
+
+        token_resp = client.post("/v1/auth/token",
+                                 json={"username": args.username,
+                                       "password": args.password})
+        token_body = token_resp.json() or {}
+        token = token_body.get("access_token")
+        c.check(f"登录成功且角色正确（{args.username} / {token_body.get('role')}）",
+                token_resp.status_code == 200 and token_body.get("role") == args.role,
+                token_resp.text[:80])
+        client.headers["Authorization"] = f"Bearer {token}"
+
+        me = client.get("/v1/auth/me")
+        c.check("GET /v1/auth/me 返回当前身份",
+                me.status_code == 200 and (me.json() or {}).get("username") == args.username,
+                me.text[:80])
+
         # ── 运维端点 ──
         c.section("运维端点")
         health = client.get("/healthz")
@@ -426,6 +457,12 @@ def run(args: argparse.Namespace) -> int:
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="对运行中的 test-data-platform 做端到端冒烟")
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
+    ap.add_argument("--username", default=os.environ.get("TDP_SMOKE_USER", "admin"),
+                    help="冒烟登录账号（默认 admin，来自 init_db --seed-demo）")
+    ap.add_argument("--password", default=os.environ.get("TDP_SMOKE_PASSWORD", "Admin@12345"),
+                    help="冒烟账号口令；生产环境别用演示口令")
+    ap.add_argument("--role", default=os.environ.get("TDP_SMOKE_ROLE", "admin"),
+                    help="期望的角色，用于断言 token 里的角色")
     ap.add_argument("--project-id", type=int, default=0)
     ap.add_argument("--version-id", type=int, default=0)
     ap.add_argument("--vehicle-id", type=int, default=0)

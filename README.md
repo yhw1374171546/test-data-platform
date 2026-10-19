@@ -33,10 +33,11 @@
 | 4 | **日终对账**：三方对齐（明细 / 汇总 / 失败是否提单）+ 差异单自动解决 | ✅ | **注入 5 种差错 → 检出 6/6 条、误报 0；修好后重跑自动 resolved** |
 | 5 | **缓存一致性**：A 同步删 / B 延迟双删 / C 消息驱动 + **负对照** + 批量消费 | ✅ | **负对照脏读 99.65%（证明能测出）；A 1.72% / B 4.30% / C 10.12%（C 的窗口=消费延迟，有界且不丢）；TTL 兜底后全部收敛** |
 | 6 | **占用方案 P99** + **50 万条 keyset 深分页** + 性能索引迁移 | ✅ | **A/B/C 正确性一致（恰好 1 人成功）；P99 A 269ms / B 275ms / C 25ms（DB 语句 603→9）；分页第 25000 页 OFFSET 148ms vs keyset 1.2ms（128x）；带 project 过滤时浅页 113ms→1.5ms，靠复合索引** |
+| 7 | **认证 / 限流 / 链路追踪 / 监控**（工程化补充） | ✅ | **401/403/429 全部有测试；JWT 角色矩阵（viewer/tester/admin）9 条；令牌桶 429 带 Retry-After；W3C traceparent 可透传、5xx 记 ERROR；Prometheus 7 条告警 + Grafana 13 面板** |
 
-报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md)
+报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：150 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 34），`dev.cmd` 端到端冒烟 **40 项**。
+**当前测试规模：183 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 67），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -53,12 +54,13 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（150 个用例，真库 + Redis） |
-| `dev.cmd smoke` | 起临时服务，跑 40 项真实 HTTP 冒烟（含缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
+| `dev.cmd test` | `pytest`（183 个用例，真库 + Redis） |
+| `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
 | `dev.cmd bench` | **十项实验**：档期竞争（1000）+ 领取竞争（20）+ 提交竞争（20）+ outbox 故障注入 + 对账注入 + 缓存一致性 + 占用三方案 P99 + 深分页 + 多 worker + HTTP 层压测 |
 | `dev.cmd api -Port 8000 -Reload` | 启动服务 → <http://127.0.0.1:8000/docs> |
+| `dev.cmd token -User admin` | 打印一个 JWT（演示账号见下方「约定」） |
 | `dev.cmd docs` | 打印地址与可直接复制的示例请求 |
 
 > `dev.cmd` 是 `dev.ps1` 的包装器：Windows 默认 `ExecutionPolicy=Restricted` 会拒绝执行 `.ps1`，
@@ -123,6 +125,8 @@ python scripts/api_smoke.py --base-url http://127.0.0.1:8000
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
+| POST | `/v1/auth/token` | **用账号口令换 JWT**（唯一公开的业务接口） | — |
+| GET | `/v1/auth/me` | 当前身份（token 自述） | — |
 | POST | `/v1/bookings` | 预约车辆档期（**核心并发点**） | 必需 |
 | POST | `/v1/bookings/{no}/cancel` | 取消并释放档期（可重复调用） | 必需 |
 | GET | `/v1/vehicles/{vin}/slots?date=` | 查某天档期（`only_free=true` 只看可约） | — |
@@ -148,6 +152,13 @@ python scripts/api_smoke.py --base-url http://127.0.0.1:8000
 
 ### 约定
 
+- **业务接口默认要 `Authorization: Bearer <token>`**（`POST /v1/auth/token` 除外）。
+  角色是"至少"关系：`admin > tester > viewer`；`GET` 需要 viewer，写需要 tester，
+  `/v1/jobs/*` 与 `/v1/admin/*` 需要 admin。演示账号（`init_db --seed-demo` 灌入）：
+  `admin/Admin@12345`、`tester/Tester@12345`、`viewer/Viewer@12345`。
+  `TDP_AUTH=off` 可关掉认证（**仅内网联调**，关闭后匿名按 admin 放行）。
+- **限流**：令牌桶，默认 `600 次 / 60 秒`（按用户分桶，无 token 按 IP）；
+  拒绝返回 `429` + `Retry-After`。`/healthz` `/readyz` `/metrics` 豁免。
 - **写接口必须带 `Idempotency-Key`**：同 key 同 body → 返回首次响应（`replay=true`）；
   同 key 换 body → `422`，且不产生任何副作用；缺头 → `400`。
   **例外**：`PATCH /v1/vehicles/{vin}` 设的是绝对值，同一个 body 调 N 次结果一样，
@@ -155,7 +166,7 @@ python scripts/api_smoke.py --base-url http://127.0.0.1:8000
 - **幂等指纹只算请求体**：`executed_at` 缺省时服务端会补 `now()`，但补出来的值不参与哈希——
   否则同一个请求每次重试都被判成"换了 body"。
 - **错误体统一** `{error, detail, trace_id}`，`trace_id` 同时回写到响应头 `X-Request-ID`。
-- 状态码：`400` 参数/缺头、`404` 对象不存在、`409` 业务冲突、`422` 校验失败或同 key 换 body、
+- 状态码：`400` 参数/缺头、`401` 未认证、`403` 角色不够、`404` 对象不存在、`409` 业务冲突、`422` 校验失败或同 key 换 body、`429` 被限流、
   `503` DB 不可用。409 的具体 `error` 取值：
   `slot_not_available` / `booking_not_cancellable` / `illegal_transition` / `state_conflict` /
   `already_claimed` / `version_conflict` / `not_claim_owner` / `not_releasable` /
@@ -211,7 +222,7 @@ Invoke-RestMethod 'http://127.0.0.1:8000/v1/admin/recon/discrepancies?resolved=f
 test-data-platform/
 ├── app/
 │   ├── api/          bookings.py / defects.py / queue.py / executions.py
-│   │                 jobs.py / admin.py / catalog.py
+│   │                 jobs.py / admin.py / catalog.py / auth.py / authz.py
 │   │                 deps.py / errors.py / schemas.py / context.py
 │   ├── domain/       defect_state.py（状态机）· queue_state.py（队列规则）
 │   │                 slot_policy.py（半天粒度）· biz_time.py（业务日期口径）
@@ -221,18 +232,21 @@ test-data-platform/
 │   │                 outbox.py（worker：重算汇总/退避/死信/批量失效）
 │   │                 recon.py（三方对账 + 差异单自动解决）
 │   │                 catalog.py（车辆/用例详情：缓存读 + 会失效的写）
+│   │                 users.py（账号校验：不认识 HTTP）
 │   ├── infra/        db.py · idempotency.py · metrics.py
 │   │                 cache.py（三策略 + 负对照）· redis_lock.py（预占：C 方案的漏斗）
+│   │                 auth.py（口令哈希 + JWT）· ratelimit.py（令牌桶）· tracing.py（OTel）
 │   └── main.py       中间件（trace_id + 指标）→ 路由 → 运维端点
 ├── alembic.ini · migrations/env.py（不做 autogenerate：表是手写 SQL）
-├── migrations/sql/001_baseline.sql · 002_perf_indexes.sql（DDL 单一来源）
-├── migrations/versions/0001_baseline.py · 0002_perf_indexes.py（只做版本编排）
+├── migrations/sql/001_baseline.sql · 002_perf_indexes.sql · 003_app_users.sql（DDL 单一来源）
+├── migrations/versions/0001_baseline.py · 0002_perf_indexes.py · 0003_app_users.py（只做版本编排）
 ├── scripts/          init_db.py（建库建表+演示数据）· api_smoke.py（真实 HTTP 冒烟）
 │                     outbox_worker.py（常驻 worker）· recon.py（对账命令行）
 ├── tests/            test_defect_state.py · test_defect_flow.py · test_queue_state.py
 │                     test_claim_flow.py · test_execution_flow.py · test_biz_time.py
 │                     test_outbox_worker.py · test_recon_rules.py · test_recon_flow.py
-│                     test_cache_catalog.py · test_booking_schemes.py · test_api.py
+│                     test_cache_catalog.py · test_booking_schemes.py
+│                     test_auth.py · test_rate_limit.py · test_tracing.py · test_api.py
 │                     conftest.py
 ├── bench/            slot_contention.py（档期竞争）· claim_race.py（领取竞争）
 │                     execution_submit.py（提交竞争）· outbox_fault.py（故障注入）
@@ -299,7 +313,17 @@ test-data-platform/
 19. **endpoint 全部是同步 `def`**：DB 是阻塞的，写成 `async def` 会卡死事件循环。
     代价是并发上限先被 anyio 的**线程池**卡住（默认 40），再叠上 DB 连接池 —— HTTP 层压测里
     P99 比 service 层高 60~80ms，就是这两级排队，不是 uvicorn 慢。
-20. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
+19. **认证的边界在"路由器 + HTTP 方法"上**：一个路由器里既有 GET 也有 POST，
+    只挂一个角色必然错（要么 viewer 读不了，要么 viewer 能写）。所以 `GET→viewer / 写→tester /
+    /v1/jobs 与 /v1/admin→admin`，按方法分级是最小代价的细分。
+20. **登录失败不区分"用户不存在/密码错"**：区分了就是用户名枚举器。原因只写日志，
+    对外统一 `invalid_credentials`；口令用 PBKDF2 + 每用户随机盐，绝不存明文。
+21. **限流是令牌桶，且按身份分桶**：窗口计数在边界会放过 2 倍流量；全局限流会让一个客户端
+    拖垮所有人；探针和 `/metrics` 必须豁免（否则 K8s 探活被 429 判死）。拒绝要带 `Retry-After`。
+22. **追踪用 W3C `traceparent`，且默认不导出**：格式标准才能和网关/Mesh/RUM 对接；
+    默认不挂 exporter，本地和 CI 不会因为"没起 collector"变慢或报错。
+    `X-Request-ID`（给人搜日志）和 `traceparent`（给追踪系统拼链路）并存，职责不同。
+23. **多副本正确性靠 `SKIP LOCKED` + 两个硬指标**：`attempts` 恰好 1（重复消费会露馅）+
     汇总 `total` 等于消息数（"重算"而不是"累加"，所以即使重复也不会多算）。
     4 个 worker × 200 条实测：0 条重复、0 差异。
 21. **迁移要能处理"老库"**：`init_db.py` 发现"有表但没有 `alembic_version`"时先 `stamp head`
@@ -345,6 +369,9 @@ test-data-platform/
 | 31 | `alembic.ini` 里写中文注释，`alembic current` 崩 `UnicodeDecodeError: 'gbk'` | `configparser` 按**系统 locale** 读 ini（中文 Windows 是 GBK），不认 UTF-8。**ini 只能放 ASCII**，说明写进 `env.py` |
 | 32 | 迁移里 `op.execute(整个 .sql)` 报 `cannot insert multiple commands into a prepared statement` | `op.execute` 走 psycopg3 扩展协议，带参数时禁止多语句。改成 `op.get_bind().connection.dbapi_connection.execute(sql)`（无参数 → 简单协议，支持多语句） |
 | 33 | 多 worker 实验里"明细 vs 汇总有差异"一直红 | `diff_summary()` 返回的是**字典**（`mismatched`/`missing`/`extra`/`diff_count`），写 `len(diffs)==0` 恒为 4。要用 `diffs["diff_count"]` |
+| 34 | HTTP 压测跑着跑着请求全超时，像服务卡死 | 子进程 `Popen(stdout=PIPE)` 但没人读，uvicorn 写日志把 64KB 缓冲写满后**阻塞在写日志上**。改成把日志写文件 |
+| 35 | 追踪测试里"一条 span 都没采到" | 夹具写成 `yield exporter.get_finished_spans()`，`yield` 时求值成了**空快照**。要 yield 一个取值函数 |
+| 36 | 压测的读请求全是 429，缓存命中率 0% | 默认限流 600/分钟，一次压测 600+ 请求。压测必须在拉起服务时放开 `TDP_RATE_LIMIT`，否则测的是限流器 |
 
 ---
 
@@ -367,7 +394,7 @@ test-data-platform/
 | ~~Dockerfile / compose~~ ✅ | `docker compose up --build` 一条命令起 PG/Redis/migrate/app/worker | 本机没装 Docker，未经本地构建验证；CI 的 `docker` job 兜底 |
 | ~~HTTP 层压测 / 多 worker~~ ✅ | `bench/http_load.py`、`bench/multi_worker.py`（后者证明 0 条重复处理） | 容量结论仍只有单进程 uvicorn |
 | 幂等键 TTL | `idempotency_keys` 只增不删 | 定时任务按 `created_at` 删（索引已在 002 里备好） |
-| 429 限流 | 只有并发竞争，没有速率限制 | 网关层令牌桶，或按 `X-Request-ID` 维度 |
-| 认证 | 接口全开放 | 网关鉴权 + 内部服务用 mTLS |
-| 告警规则 / 调度 | 只有 `/metrics`，且 worker/对账靠手动跑 | Prometheus 规则（死信、积压、缓存未命中率）+ cron 或常驻 worker |
+| ~~429 限流~~ ✅ | 令牌桶中间件（按用户/IP 分桶、探针豁免、`Retry-After`） | 多副本要换 Redis 做全局配额 |
+| ~~认证~~ ✅ | JWT + `app_users` + 三角色（admin/tester/viewer），401/403 全覆盖 | 细粒度 ABAC（按 project_id 过滤）仍没做 |
+| ~~告警规则~~ ✅ / 调度 ❌ | `deploy/prometheus/alerts.yml` 7 条规则 + 13 面板 dashboard；worker/对账仍靠手动跑 | 缺 cron/常驻调度 |
 | 缓存穿透 / 击穿 | 不存在的 key 会反复回源；热 key 过期瞬间回源 | 空值短 TTL 缓存 + 单飞重建 |

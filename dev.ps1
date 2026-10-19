@@ -56,7 +56,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs')]
+    [ValidateSet('all', 'check', 'init', 'test', 'smoke', 'worker', 'recon', 'bench', 'api', 'docs', 'token')]
     [string]$Action = 'all',
 
     [int]$Port = 8000,
@@ -64,7 +64,10 @@ param(
     [int]$ClaimConcurrency = 20,
     [switch]$Watch,
     [switch]$Reload,
-    [string]$Dsn = $env:TDP_DATABASE_URL
+    [string]$Dsn = $env:TDP_DATABASE_URL,
+    # dev.cmd token 用：默认给管理员演示账号
+    [string]$User = 'admin',
+    [string]$Password = 'Admin@12345'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -449,6 +452,35 @@ function Show-Docs {
     Write-Host ""
     Write-Note '演示数据已灌好：project_id / vehicle_id / testers_id 用 1 即可；任务池里已有 pending 任务'
     Write-Note '提交结果前必须先 claim 那条 task（body 里的 task_id 要换成你领到的那条）'
+    Write-Host ""
+    Write-Host '  # 0) 先换 token（业务接口默认要 Bearer；演示账号见 dev.cmd token）' -ForegroundColor Gray
+    Write-Host "  `$token = (Invoke-RestMethod -Method Post '$base/v1/auth/token' -ContentType 'application/json' -Body '{`"username`":`"admin`",`"password`":`"Admin@12345`"}').access_token" -ForegroundColor Gray
+    Write-Host "  `$auth = @{ Authorization = `"Bearer `$token`" }   # 下面每个请求都和 Idempotency-Key 合并使用" -ForegroundColor Gray
+}
+
+function Invoke-Token {
+    Write-Step '签发一个 JWT（演示/联调用）'
+    $env:PYTHONUTF8 = '1'
+    $python = Get-PythonPath
+    & $python -c @"
+import sys
+sys.path.insert(0, '.')
+from app.infra import auth
+from app.service import users
+
+username, password = sys.argv[1], sys.argv[2]
+try:
+    user = users.authenticate(username, password)
+except Exception as exc:
+    print(f'登录失败：{exc}')
+    raise SystemExit(1)
+token, ttl = auth.issue_token(user.username, user.role)
+print(token)
+print(f'# username={user.username} role={user.role} ttl={ttl}s', file=sys.stderr)
+"@ $User $Password
+    if ($LASTEXITCODE -ne 0) { throw '签发失败：先用 dev.cmd init --seed-demo 灌演示账号' }
+    Write-Note "用法：`$token = (上面那行)；然后请求头加 @{ Authorization = `"Bearer `$token`" }"
+    Write-Note '演示账号：admin/Admin@12345（可写可管理）、tester/Tester@12345（可写）、viewer/Viewer@12345（只读）'
 }
 
 # ====================== 主流程 ======================
@@ -464,6 +496,7 @@ try {
         'bench' { Invoke-Bench }
         'api' { Invoke-Api }
         'docs' { Show-Docs }
+        'token' { Invoke-Token }
         'all' {
             Invoke-Check
             Invoke-Init
