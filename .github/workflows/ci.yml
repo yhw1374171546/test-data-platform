@@ -76,8 +76,11 @@ jobs:
       - name: 静态检查（只查真正的错误，不卡风格）
         run: ruff check app tests scripts bench --select F,E9,F63,F7,F82,B
 
-      - name: 单元 + 集成测试（真库 + 真 Redis）
-        run: python -m pytest -q --junitxml=pytest-report.xml
+      - name: 单元 + 集成测试（真库 + 真 Redis，覆盖率门禁 85%）
+        run: |
+          python -m pytest -q --junitxml=pytest-report.xml \
+            --cov=app --cov-report=term-missing --cov-report=xml \
+            --cov-fail-under=85
 
       - name: 端到端冒烟（真实 HTTP，40 项）
         run: |
@@ -96,6 +99,30 @@ jobs:
           path: pytest-report.xml
           if-no-files-found: ignore
 
+
+  # ── 3. 供应链与密钥扫描：依赖有已知漏洞、仓库里混进密钥都要拦下来 ──
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # gitleaks 要扫全历史，浅克隆会漏
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 依赖漏洞扫描（pip-audit）
+        run: |
+          python -m pip install --quiet pip-audit
+          pip-audit -r requirements.txt --strict || \
+            (echo "::warning::依赖存在已知漏洞，评估后升级或记录例外"; exit 1)
+
+      - name: 密钥/凭据扫描（gitleaks）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # ── 2. 镜像能构建、compose 文件合法（本地没装 Docker，靠 CI 兜底）──
   docker:
     runs-on: ubuntu-latest

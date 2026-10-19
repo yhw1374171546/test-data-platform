@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import signal
 import sys
 import time
 from typing import Any, Callable, Dict, Optional
@@ -26,6 +27,7 @@ from typing import Any, Callable, Dict, Optional
 BASE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
+from app.infra import logs
 from app.service.outbox import (DEFAULT_BACKOFF_BASE, DEFAULT_MAX_ATTEMPTS,
                                 outbox_stats, process_batch)
 
@@ -55,6 +57,7 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--strict", action="store_true",
                     help="有死信时以退出码 1 结束（给 CI/巡检用；交互式演示默认 0）")
     ap.add_argument("--max-rounds", type=int, default=10_000, help="--drain 的最大轮数保护")
+    logs.setup()
     args = ap.parse_args(argv)
 
     fault: Optional[Callable[[Any], None]] = _injected_fault if args.inject_failure else None
@@ -64,8 +67,26 @@ def main(argv: Optional[list] = None) -> int:
     rounds = 0
     totals = {"scanned": 0, "done": 0, "failed": 0, "dead": 0}
 
+    # 优雅停机：SIGTERM 后**不再取新消息**，但把当前这一批处理完再退。
+    # 否则 docker stop 会在消息处理到一半时杀进程 —— 消息还在 pending，
+    # 下一轮会重投，等于白做一次（虽然重算幂等，但延迟和日志都难看）。
+    stopping = {"flag": False}
+
+    def _stop(signum: int, _frame: object) -> None:
+        stopping["flag"] = True
+        print(f"\n[worker] 收到信号 {signum}，处理完当前批次后退出")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _stop)
+        except (ValueError, OSError):                # pragma: no cover - 非主线程/平台差异
+            pass
+
     try:
         while rounds < args.max_rounds:
+            if stopping["flag"]:
+                print("[worker] 已收到停止信号，不再取新消息")
+                break
             rounds += 1
             stats = process_batch(limit=args.batch, biz_date=args.biz_date,
                                   fault=fault, max_attempts=args.max_attempts,

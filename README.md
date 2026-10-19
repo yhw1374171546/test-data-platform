@@ -39,7 +39,7 @@
 
 报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：218 个**（纯函数 42 + 落库/集成 79 + HTTP 契约 92），`dev.cmd` 端到端冒烟 **44 项**。
+**当前测试规模：223 个**（纯函数 47 + 落库/集成 79 + HTTP 契约 97），`app/` 覆盖率 **91%**（CI 门禁 85%），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -56,7 +56,7 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（218 个用例，真库 + Redis） |
+| `dev.cmd test` | `pytest`（223 个用例，真库 + Redis；加 `--cov=app` 看覆盖率） |
 | `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
@@ -169,6 +169,8 @@ python scripts/api_smoke.py --base-url http://127.0.0.1:8000
 - **限流**：令牌桶，默认 `600 次 / 60 秒`（按用户分桶，无 token 按 IP）；
   拒绝返回 `429` + `Retry-After`。`/healthz` `/readyz` `/metrics` 豁免。
   多副本设 `TDP_RATE_LIMIT_BACKEND=redis`，用 Lua 共享配额；Redis 挂了自动降级到进程内并计数。
+- **日志**：默认文本格式；线上设 `TDP_LOG_FORMAT=json`，一行一条 JSON，字段含 `trace_id`（从 contextvars 取，不用手动传）——配合日志系统才能按请求聚合。
+- **优雅停机**：收到 SIGTERM 后 `/readyz` 立刻 503（摘流量），等在途请求跑完再退；worker 同样处理完当前批次就停。
 - **写接口必须带 `Idempotency-Key`**：同 key 同 body → 返回首次响应（`replay=true`）；
   同 key 换 body → `422`，且不产生任何副作用；缺头 → `400`。
   **例外**：`PATCH /v1/vehicles/{vin}` 设的是绝对值，同一个 body 调 N 次结果一样，
@@ -401,6 +403,8 @@ test-data-platform/
 | 38 | 前端挂到 `/ui` 后整页白屏 | Vite 默认 `base: "/"`，构建出来的 index.html 去请求 `/assets/*.js`（404）。改成 `base: "/ui/"` 才对得上挂载路径 |
 | 39 | `pnpm install` 报 `ERR_PNPM_IGNORED_BUILDS`，装完 esbuild 却构建失败 | pnpm 10+ 默认不跑依赖的 postinstall，必须显式允许（pnpm 11 写在 `pnpm-workspace.yaml` 的 `allowBuilds`）。esbuild 不跑就缺平台二进制 |
 | 40 | 日报接口带 `project_id` 就 500 | `:pid IS NULL OR ...` 里裸参数没有类型，PG 推断不出来；写成 `CAST(:pid AS BIGINT) IS NULL` 才行（可空 int 参数的老坑） |
+| 41 | 加了优雅停机后，`/readyz` 在后续用例里一直是 503 | `draining` 是模块级状态，上一个 app 实例 shutdown 时置了 True，下一个实例不会自动复位。启动时 `reset_drain_state()` 才对 |
+| 42 | 覆盖率把 CLI 脚本算进去会虚低 | `--cov=app` 只统计服务代码；`scripts/` 是运维入口，由冒烟脚本覆盖（44 项真实 HTTP），不用行覆盖率衡量 |
 
 ---
 

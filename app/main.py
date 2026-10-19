@@ -11,11 +11,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, AsyncIterator, Dict
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -34,7 +36,7 @@ from app.api.executions import router as executions_router
 from app.api.jobs import router as jobs_router
 from app.api.meta import router as meta_router
 from app.api.queue import router as queue_router
-from app.infra import metrics, ratelimit, tracing
+from app.infra import logs, metrics, ratelimit, tracing
 from app.infra.db import engine
 
 logger = logging.getLogger("tdp.http")
@@ -47,6 +49,7 @@ async def _observe(request: Request, call_next: Any) -> Response:
     trace_id = (request.headers.get("X-Request-ID") or "").strip() or new_trace_id()
     token = set_trace_id(trace_id)
     metrics.HTTP_INFLIGHT.inc()
+    _INFLIGHT["n"] += 1
     started = time.perf_counter()
     status = 500
     try:
@@ -72,6 +75,7 @@ async def _observe(request: Request, call_next: Any) -> Response:
         route = request.scope.get("route")
         label = getattr(route, "path", None) or request.url.path
         metrics.HTTP_INFLIGHT.dec()
+        _INFLIGHT["n"] = max(0, _INFLIGHT["n"] - 1)
         metrics.HTTP_REQUESTS.labels(method=request.method, path=label,
                                      status=str(status)).inc()
         metrics.HTTP_LATENCY.labels(method=request.method, path=label).observe(elapsed)
@@ -143,14 +147,58 @@ async def _rate_limit(request: Request, call_next: Any) -> Response:
     )
 
 
+# ── 优雅停机 ─────────────────────────────────────────────────
+# 收到 SIGTERM 时不能立刻断：K8s / 滚动发布会给 30 秒宽限期，
+# 这时如果直接退出，in-flight 请求会 502，worker 处理一半的消息会重复消费。
+# 做法：先把 /readyz 变成 503（让负载均衡不再派新请求），再等 in-flight 归零。
+_DRAINING = {"on": False}
+_INFLIGHT = {"n": 0}
+_DRAIN_TIMEOUT_SEC = float(os.environ.get("TDP_DRAIN_TIMEOUT", "20"))
+
+
+def begin_drain() -> None:
+    _DRAINING["on"] = True
+
+
+def is_draining() -> bool:
+    return _DRAINING["on"]
+
+
+def inflight() -> int:
+    return _INFLIGHT["n"]
+
+
+def reset_drain_state() -> None:
+    """测试用：把状态复位（全局变量，不 reset 会污染下一个用例）。"""
+    _DRAINING["on"] = False
+    _INFLIGHT["n"] = 0
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # 每次启动都复位：模块级状态会被同一进程里的上一个 app 实例污染（测试里尤其明显）
+    reset_drain_state()
+    logger.info("服务启动 version=%s log_format=%s", VERSION,
+                (os.environ.get("TDP_LOG_FORMAT") or "text").lower())
+    yield
+    # 关停：先摘流量，再等在途请求跑完
+    begin_drain()
+    waited = 0.0
+    while _INFLIGHT["n"] > 0 and waited < _DRAIN_TIMEOUT_SEC:
+        await asyncio.sleep(0.1)
+        waited += 0.1
+    if waited:
+        logger.info("优雅停机：等待在途请求 %.1fs，剩余 %s 个", waited, _INFLIGHT["n"])
+    else:
+        logger.info("优雅停机：没有在途请求")
+
+
 def create_app() -> FastAPI:
-    logging.basicConfig(
-        level=os.environ.get("TDP_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    logs.setup()                         # TDP_LOG_FORMAT=json|text（默认 text）
 
     tracing.setup()                      # 幂等；没配 OTLP 端点就只在进程内用 span
     app = FastAPI(
+        lifespan=_lifespan,
         title="测试数据管理平台",
         version=VERSION,
         description=(
@@ -198,6 +246,10 @@ def create_app() -> FastAPI:
 
     @app.get("/readyz", tags=["ops"], summary="就绪探针（查库）")
     def readyz() -> Response:
+        if is_draining():
+            # 停机信号已收到：告诉负载均衡别再派活，但已有请求继续跑完
+            return JSONResponse({"status": "draining", "db": "unknown",
+                                 "trace_id": current_trace_id()}, status_code=503)
         try:
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
