@@ -88,6 +88,15 @@ CACHE_INVALIDATIONS = _counter("tdp_cache_invalidations_total", "缓存失效次
 
 EXPORTER_ENABLED = ENABLED
 
+# ── 认证 / 限流（工程化补充）──────────────────────────────────
+# 认证失败率飙升 = 有人在扫口令，或者客户端把 token 用错了（过期没刷新）
+AUTH_ATTEMPTS = _counter("tdp_auth_attempts_total", "认证结果分布",
+                         ("result",))   # ok|login_ok|missing|expired|invalid|bad_role|forbidden
+# 429 变多说明有人在打接口，或者自己的客户端在重试风暴里
+RATE_LIMITED = _counter("tdp_rate_limited_total", "被限流拒绝的请求数", ("route",))
+# 注意：**不要**给每个桶（用户/IP）建 gauge —— 标签基数会随用户数爆炸，
+# 那是 Prometheus 的经典反模式。要看桶，用 /metrics 之外的调试接口或日志。
+
 
 def render() -> tuple:
     """返回 (响应体 bytes, content_type)；未安装 prometheus_client 时抛 RuntimeError。"""
