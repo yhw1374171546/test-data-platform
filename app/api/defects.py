@@ -10,6 +10,8 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, Response
 
+from app.api.abac import ensure_defect, ensure_project, visible_projects
+from app.api.authz import current_user
 from app.api.deps import require_idempotency_key
 from app.api.errors import AppError, translate_domain_errors
 from app.api.schemas import (DefectCreate, DefectCreatedOut, DefectListOut,
@@ -17,6 +19,7 @@ from app.api.schemas import (DefectCreate, DefectCreatedOut, DefectListOut,
                              TransitionOut)
 from app.domain import defect_state
 from app.infra import metrics
+from app.infra import auth
 from app.service.defect import (create_defect, get_defect, list_defects,
                                 transition_defect)
 
@@ -48,7 +51,10 @@ def status_machine() -> StatusMachineOut:
 @router.post("", response_model=DefectCreatedOut, status_code=201,
              summary="人工提报问题单（正常链路由执行失败自动带出）")
 def create_defect_api(payload: DefectCreate, response: Response,
-                      idem_key: IdemKey) -> DefectCreatedOut:
+                      idem_key: IdemKey,
+                      user: Annotated[auth.User, Depends(current_user)]) -> DefectCreatedOut:
+    # ABAC：只能在自己参与的项目里提问题单（admin 直通）
+    ensure_project(user, payload.project_id, action="提报问题单")
     with translate_domain_errors():
         result = create_defect(idem_key=idem_key,
                                title=payload.title,
@@ -73,7 +79,10 @@ def create_defect_api(payload: DefectCreate, response: Response,
 @router.post("/{defect_no}/transition", response_model=TransitionOut,
              summary="问题单状态转移（非法 409；重复提交 already=true）")
 def transition_api(defect_no: str, payload: TransitionIn,
-                   idem_key: IdemKey) -> TransitionOut:
+                   idem_key: IdemKey,
+                   user: Annotated[auth.User, Depends(current_user)]) -> TransitionOut:
+    # 按单号反查项目再校验：不能信任客户端传的 project_id
+    ensure_defect(user, defect_no, action="流转问题单")
     with translate_domain_errors():
         result = transition_defect(idem_key=idem_key,
                                    defect_no=defect_no,
@@ -97,21 +106,32 @@ def transition_api(defect_no: str, payload: TransitionIn,
 
 # ── 读：列表（keyset 分页）──────────────────────────────
 @router.get("", response_model=DefectListOut, summary="问题单列表（keyset 分页）")
-def list_defects_api(project_id: Optional[int] = Query(default=None, gt=0),
+def list_defects_api(user: Annotated[auth.User, Depends(current_user)],
+                     project_id: Optional[int] = Query(default=None, gt=0),
                      status: Optional[str] = Query(default=None),
                      limit: int = Query(default=20, ge=1, le=100),
                      cursor: Optional[str] = Query(
                          default=None,
                          description="上一页返回的 next_cursor：'ISO时间|id'")) -> DefectListOut:
+    scope = visible_projects(user)
+    if scope is None:                                  # admin：看全部
+        project_ids = {project_id} if project_id is not None else None
+    elif project_id is not None:
+        ensure_project(user, project_id, action="查看问题单")
+        project_ids = {project_id}
+    else:
+        project_ids = scope                           # 可能为空集合：必须真的过滤成空
     with translate_domain_errors():
-        data = list_defects(project_id=project_id, status=status,
-                            limit=limit, cursor=cursor)
+        data = list_defects(project_id=project_id, project_ids=project_ids,
+                            status=status, limit=limit, cursor=cursor)
     return DefectListOut(**data)
 
 
 # ── 读：详情 + 审计轨迹 ─────────────────────────────────
 @router.get("/{defect_no}", response_model=DefectOut, summary="问题单详情（含审计轨迹）")
-def get_defect_api(defect_no: str) -> DefectOut:
+def get_defect_api(defect_no: str,
+                   user: Annotated[auth.User, Depends(current_user)]) -> DefectOut:
+    ensure_defect(user, defect_no, action="查看问题单")
     with translate_domain_errors():
         data = get_defect(defect_no)
     return DefectOut(**data)

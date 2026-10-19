@@ -7,21 +7,28 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app.infra import auth
+from app.infra.db import session_scope
 from app.service import users
 
 
 @pytest.fixture()
-def account(refs: Dict[str, Any]) -> Dict[str, str]:
-    """造一个真实账号（口令哈希走 PBKDF2，和 init_db 灌演示数据同一条路径）。"""
+def account(refs: Dict[str, Any]) -> Iterator[Dict[str, str]]:
+    """造一个真实账号（口令哈希走 PBKDF2，和 init_db 灌演示数据同一条路径）。
+
+    用完要删：`app_users` 没有外键级联，留着会在库里堆一堆 `u-xxx`（第一次就堆到 59 个）。
+    """
     name = f"u-{refs['tag']}"
     users.create_user(name, "Secret@12345", "admin")
-    return {"username": name, "password": "Secret@12345"}
+    yield {"username": name, "password": "Secret@12345"}
+    with session_scope() as s:
+        s.execute(text("DELETE FROM app_users WHERE username = :u"), {"u": name})
 
 
 def _login(client: TestClient, username: str, password: str):

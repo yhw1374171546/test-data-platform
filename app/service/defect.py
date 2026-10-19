@@ -25,7 +25,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import text
 
@@ -288,12 +288,17 @@ def get_defect(defect_no: str) -> Dict[str, Any]:
     }
 
 
-def list_defects(*, project_id: Optional[int] = None, status: Optional[str] = None,
+def list_defects(*, project_id: Optional[int] = None,
+                 project_ids: Optional[Set[int]] = None,
+                 status: Optional[str] = None,
                  limit: int = 20, cursor: Optional[str] = None) -> Dict[str, Any]:
     """keyset 分页（技术方案 §4.7 的接口形态）。
 
-    这里只提供**能用**的版本，50 万条下的 P99 对比和 `EXPLAIN (ANALYZE, BUFFERS)`
-    是 week 3 的 bench 任务。接口形态先定下来，后面只换实现不改契约。
+    `project_ids` 是 **ABAC 的可见范围**：
+      · `None`  → 不按项目过滤（管理员）
+      · `set()` → 一个项目都没有，返回空页（**必须真的过滤成空**，
+                  写成"空就不过滤"是 ABAC 最典型的漏洞）
+      · 非空   → 只返回这些项目的数据
 
     游标 = `(created_at, id)`：
       · 只带 created_at 会在同一毫秒的多条记录上丢数据；
@@ -306,6 +311,12 @@ def list_defects(*, project_id: Optional[int] = None, status: Optional[str] = No
     if project_id is not None:
         where.append("project_id = :pid")
         params["pid"] = int(project_id)
+
+    if project_ids is not None:
+        if not project_ids:
+            return {"items": [], "next_cursor": None, "limit": limit, "has_more": False}
+        where.append("project_id = ANY(:pids)")
+        params["pids"] = [int(p) for p in sorted(project_ids)]
 
     if status:
         if not is_known(str(status).strip().lower()):

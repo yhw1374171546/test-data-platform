@@ -199,6 +199,16 @@ def seed_demo(dsn: str) -> Dict[str, int]:
                        active = TRUE
             """, (username, hash_password(password), role))
 
+        # ABAC：把非管理员演示账号加进演示项目。
+        # admin 不需要成员关系（管理员直通），这本身也是一条可讲的权限设计。
+        for username, _password, role in DEMO_USERS:
+            if role == "admin":
+                continue
+            conn.execute("""
+                INSERT INTO project_members (project_id, username) VALUES (%s, %s)
+                ON CONFLICT (project_id, username) DO NOTHING
+            """, (pid, username))
+
         stats = {
             "projects": _scalar(conn, "SELECT count(*) FROM projects"),
             "vehicles": _scalar(conn, "SELECT count(*) FROM vehicles"),
@@ -207,6 +217,7 @@ def seed_demo(dsn: str) -> Dict[str, int]:
             "test_cases": _scalar(conn, "SELECT count(*) FROM test_cases"),
             "execution_queue": _scalar(conn, "SELECT count(*) FROM execution_queue"),
             "app_users": _scalar(conn, "SELECT count(*) FROM app_users"),
+            "project_members": _scalar(conn, "SELECT count(*) FROM project_members"),
         }
         conn.commit()
     return stats

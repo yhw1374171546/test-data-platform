@@ -13,10 +13,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
 
+from app.api.abac import ensure_booking, ensure_project
+from app.api.authz import current_user
 from app.api.deps import require_idempotency_key
 from app.api.errors import AppError, translate_domain_errors
 from app.api.schemas import BookingCreate, BookingOut, SlotsOut
-from app.infra import metrics
+from app.infra import auth, metrics
 from app.service.booking import cancel_booking, create_booking, list_slots
 
 router = APIRouter(prefix="/v1", tags=["booking"])
@@ -29,8 +31,10 @@ IdemKey = Annotated[str, Depends(require_idempotency_key)]
 @router.post("/bookings", response_model=BookingOut,
              summary="预约车辆档期（核心并发点）")
 def create_booking_api(payload: BookingCreate, response: Response,
-                       idem_key: IdemKey) -> BookingOut:
+                       idem_key: IdemKey,
+                       user: Annotated[auth.User, Depends(current_user)]) -> BookingOut:
     """成功 201；命中幂等键则重放首次响应（`replay=true`）；档期被占 → 409。"""
+    ensure_project(user, payload.project_id, action="预约档期")
     with translate_domain_errors():
         result = create_booking(idem_key=idem_key,
                                 project_id=payload.project_id,
@@ -55,7 +59,10 @@ def create_booking_api(payload: BookingCreate, response: Response,
 @router.post("/bookings/{booking_no}/cancel", response_model=BookingOut,
              summary="取消预约（释放档期，可重复调用）")
 def cancel_booking_api(booking_no: str, response: Response,
-                       idem_key: IdemKey) -> BookingOut:
+                       idem_key: IdemKey,
+                       user: Annotated[auth.User, Depends(current_user)]) -> BookingOut:
+    # 按预约单反查项目：不能凭"知道单号"就能取消别人的档期
+    ensure_booking(user, booking_no, action="取消预约")
     with translate_domain_errors():
         result = cancel_booking(idem_key=idem_key, booking_no=booking_no)
 

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy import text
 
@@ -395,12 +395,16 @@ def release_task(*, idem_key: str, task_id: int, tester_id: int) -> ReleaseResul
 
 
 # ────────────────────────── 查询 ──────────────────────────
-def list_queue(*, project_id: Optional[int] = None, status: Optional[str] = None,
+def list_queue(*, project_id: Optional[int] = None,
+               project_ids: Optional[Set[int]] = None,
+               status: Optional[str] = None,
                after_id: Optional[int] = None, limit: int = 20) -> Dict[str, Any]:
     """任务池列表（keyset 按 id 翻页）。
 
     队列的翻页天然简单：`id` 就是单调递增的序，`WHERE id > :after ORDER BY id` 直接命中主键，
     不需要像问题单那样拼 `(created_at, id)` 复合游标。
+
+    `project_ids` 是 ABAC 的可见范围（`None`=管理员看全部；空集合=真的空页）。
     """
     limit = max(1, min(int(limit or 20), 100))
     where: List[str] = ["1 = 1"]
@@ -409,6 +413,11 @@ def list_queue(*, project_id: Optional[int] = None, status: Optional[str] = None
     if project_id is not None:
         where.append("q.project_id = :pid")
         params["pid"] = int(project_id)
+    if project_ids is not None:
+        if not project_ids:
+            return {"items": [], "next_cursor": None, "limit": limit, "has_more": False}
+        where.append("q.project_id = ANY(:pids)")
+        params["pids"] = [int(p) for p in sorted(project_ids)]
     if status:
         normalized = normalize_status(status)
         where.append("q.status = :st")

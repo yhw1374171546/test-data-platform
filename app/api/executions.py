@@ -9,10 +9,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
 
+from app.api.abac import ensure_task
+from app.api.authz import current_user
 from app.api.deps import require_idempotency_key
 from app.api.errors import AppError, translate_domain_errors
 from app.api.schemas import ExecutionIn, ExecutionOut
-from app.infra import metrics
+from app.infra import auth, metrics
 from app.service.execution import submit_execution
 
 router = APIRouter(prefix="/v1/executions", tags=["execution"])
@@ -23,7 +25,10 @@ IdemKey = Annotated[str, Depends(require_idempotency_key)]
 @router.post("", response_model=ExecutionOut, status_code=201,
              summary="提交执行结果（同时写 executions + outbox；失败可带出问题单）")
 def submit_execution_api(payload: ExecutionIn, response: Response,
-                         idem_key: IdemKey) -> ExecutionOut:
+                         idem_key: IdemKey,
+                         user: Annotated[auth.User, Depends(current_user)]) -> ExecutionOut:
+    # 提交的是 task_id：按任务反查项目，确认这个人能碰这条任务
+    ensure_task(user, payload.task_id, action="提交执行结果")
     with translate_domain_errors():
         result = submit_execution(
             idem_key=idem_key,

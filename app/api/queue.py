@@ -17,11 +17,13 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, Query, Response
 
+from app.api.abac import ensure_project, ensure_task, visible_projects
+from app.api.authz import current_user
 from app.api.deps import require_idempotency_key
 from app.api.errors import AppError, translate_domain_errors
 from app.api.schemas import (ClaimIn, ClaimOut, QueueListOut, ReleaseIn,
                              ReleaseOut, TaskCreatedOut, TaskCreateIn)
-from app.infra import metrics
+from app.infra import auth, metrics
 from app.service.claim import claim_task, enqueue_task, list_queue, release_task
 
 router = APIRouter(prefix="/v1/queue", tags=["queue"])
@@ -32,7 +34,9 @@ IdemKey = Annotated[str, Depends(require_idempotency_key)]
 @router.post("", response_model=TaskCreatedOut, status_code=201,
              summary="把一条用例排进任务池（用例不存在则先建）")
 def enqueue_api(payload: TaskCreateIn, response: Response,
-                idem_key: IdemKey) -> TaskCreatedOut:
+                idem_key: IdemKey,
+                user: Annotated[auth.User, Depends(current_user)]) -> TaskCreatedOut:
+    ensure_project(user, payload.project_id, action="排队任务")
     with translate_domain_errors():
         result = enqueue_task(idem_key=idem_key,
                               project_id=payload.project_id,
@@ -56,6 +60,7 @@ def enqueue_api(payload: TaskCreateIn, response: Response,
 
 @router.get("", response_model=QueueListOut, summary="任务池列表（keyset 按 id 翻页）")
 def list_queue_api(
+    user: Annotated[auth.User, Depends(current_user)],
     project_id: Optional[int] = Query(default=None, gt=0),
     status: Optional[str] = Query(default=None, description="pending|claimed|running|done|cancelled"),
     limit: int = Query(default=20, ge=1, le=100),
@@ -69,15 +74,26 @@ def list_queue_api(
             raise AppError(400, "invalid_cursor",
                            {"reason": f"游标应为任务 id：{cursor!r}"}) from exc
 
+    scope = visible_projects(user)
+    if scope is None:
+        project_ids = {project_id} if project_id is not None else None
+    elif project_id is not None:
+        ensure_project(user, project_id, action="查看任务池")
+        project_ids = {project_id}
+    else:
+        project_ids = scope
+
     with translate_domain_errors():
-        data = list_queue(project_id=project_id, status=status,
-                          after_id=after_id, limit=limit)
+        data = list_queue(project_id=project_id, project_ids=project_ids,
+                          status=status, after_id=after_id, limit=limit)
     return QueueListOut(**data)
 
 
 @router.post("/claim", response_model=ClaimOut,
              summary="领取执行任务（抢占：恰好一人成功，其余 409 already_claimed）")
-def claim_api(payload: ClaimIn, idem_key: IdemKey) -> ClaimOut:
+def claim_api(payload: ClaimIn, idem_key: IdemKey,
+              user: Annotated[auth.User, Depends(current_user)]) -> ClaimOut:
+    ensure_task(user, payload.task_id, action="领取任务")
     with translate_domain_errors():
         result = claim_task(idem_key=idem_key,
                             task_id=payload.task_id,
@@ -100,7 +116,9 @@ def claim_api(payload: ClaimIn, idem_key: IdemKey) -> ClaimOut:
 
 @router.post("/{task_id}/release", response_model=ReleaseOut,
              summary="释放任务回待领取（只有领取人本人可以）")
-def release_api(task_id: int, payload: ReleaseIn, idem_key: IdemKey) -> ReleaseOut:
+def release_api(task_id: int, payload: ReleaseIn, idem_key: IdemKey,
+                user: Annotated[auth.User, Depends(current_user)]) -> ReleaseOut:
+    ensure_task(user, task_id, action="释放任务")
     with translate_domain_errors():
         result = release_task(idem_key=idem_key, task_id=task_id,
                               tester_id=payload.tester_id)
