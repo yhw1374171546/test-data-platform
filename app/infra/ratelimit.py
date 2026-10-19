@@ -113,20 +113,134 @@ _CACHED: Dict[str, Any] = {"key": None, "limiter": None}
 _CACHE_LOCK = threading.Lock()
 
 
-def get_limiter() -> Limiter:
-    """按当前配置取单例；配置变了（测试 monkeypatch、线上改配额）就重建。"""
-    signature = (limit(), window())
+# ────────────────────────── Redis 全局限流（多副本）──────────────────────────
+# 进程内桶在多副本下是"各限各的"：3 个副本 × 600/分钟 = 实际放行 1800。
+# 要全局配额就得把桶放到共享存储里，并且**判断与扣减必须原子**（否则并发下会超发）。
+#
+# 为什么用 Lua 而不是 INCR + EXPIRE：
+# INCR 是固定窗口，窗口边界能放过 2 倍流量（前一窗末尾一波 + 后一窗开头一波）。
+# Lua 脚本里做"取时间 → 补令牌 → 判断 → 扣减 → 回写"，整段在 Redis 单线程里执行，
+# 天然原子，语义和进程内的令牌桶完全一致。
+_REDIS_BUCKET_LUA = """
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local ttl_ms = tonumber(ARGV[4])
+
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+if tokens == nil then
+  tokens = capacity
+  ts = now
+end
+-- 按流逝时间补令牌，但不超过容量
+local elapsed = math.max(0, now - ts)
+tokens = math.min(capacity, tokens + elapsed * rate)
+
+local allowed = 0
+local retry = 0
+if tokens >= 1 then
+  tokens = tokens - 1
+  allowed = 1
+else
+  retry = (1 - tokens) / rate
+end
+
+redis.call('HSET', key, 'tokens', tostring(tokens), 'ts', tostring(now))
+redis.call('PEXPIRE', key, ttl_ms)
+return {allowed, tostring(retry)}
+"""
+
+
+class RedisLimiter:
+    """跨副本共享的令牌桶。Redis 不可用时**放行**并计数（降级而不是让服务瘫掉）。"""
+
+    def __init__(self, *, limit: int, window_seconds: float, prefix: str = "tdp:rl"):
+        self.limit = int(limit)
+        self.window = float(window_seconds)
+        self.rate = self.limit / self.window
+        self.prefix = prefix
+        self._fallback = Limiter(limit=limit, window_seconds=window_seconds)
+
+    def _client(self) -> Any:
+        from app.infra import cache
+        return cache.client()
+
+    def check(self, key: str) -> Tuple[bool, float]:
+        client = self._client()
+        if client is None:
+            # 降级：用进程内桶兜底。宁可限得不准，也不能因为 Redis 挂了把接口全拒了。
+            from app.infra import metrics
+            metrics.RATE_LIMIT_FALLBACKS.inc()
+            return self._fallback.check(key)
+        try:
+            allowed, retry = client.eval(
+                _REDIS_BUCKET_LUA, 1, f"{self.prefix}:{key}",
+                self.limit, self.rate, time.time(),
+                int(max(1.0, self.window) * 1000 * 2),
+            )
+            return bool(int(allowed)), float(retry)
+        except Exception:                              # noqa: BLE001 - 网络抖动同样降级
+            from app.infra import metrics
+            metrics.RATE_LIMIT_FALLBACKS.inc()
+            return self._fallback.check(key)
+
+    def remaining(self, key: str) -> float:             # 仅诊断用
+        return self._fallback.remaining(key)
+
+    def reset(self) -> None:
+        self._fallback.reset()
+        client = self._client()
+        if client is not None:
+            try:
+                for found in client.scan_iter(match=f"{self.prefix}:*", count=200):
+                    client.delete(found)
+            except Exception:                          # noqa: BLE001
+                pass
+
+
+def backend() -> str:
+    """`TDP_RATE_LIMIT_BACKEND`: memory | redis | auto（默认 auto）。"""
+    return (os.environ.get("TDP_RATE_LIMIT_BACKEND", "auto") or "auto").strip().lower()
+
+
+def get_limiter() -> Any:
+    """按当前配置取单例；配置变了（测试 monkeypatch、线上改配额）就重建。
+
+    auto：Redis 可用就用 Redis（多副本共享），否则退回进程内桶。
+    """
+    from app.infra import cache
+
+    mode = backend()
+    if mode == "redis" or (mode == "auto" and cache.available()):
+        kind = "redis"
+    else:
+        kind = "memory"
+    signature = (limit(), window(), kind)
     with _CACHE_LOCK:
         if _CACHED["key"] != signature:
-            _CACHED["limiter"] = Limiter(limit=signature[0], window_seconds=signature[1])
+            if kind == "redis":
+                _CACHED["limiter"] = RedisLimiter(limit=signature[0],
+                                                  window_seconds=signature[1])
+            else:
+                _CACHED["limiter"] = Limiter(limit=signature[0],
+                                             window_seconds=signature[1])
             _CACHED["key"] = signature
         return _CACHED["limiter"]
 
 
 def reset() -> None:
     with _CACHE_LOCK:
+        limiter = _CACHED["limiter"]
         _CACHED["key"] = None
         _CACHED["limiter"] = None
+    if limiter is not None:
+        try:
+            limiter.reset()                            # 清掉 Redis 里的桶，测试之间互不影响
+        except Exception:                              # noqa: BLE001
+            pass
 
 
 SKIP_PATHS = frozenset({"/", "/healthz", "/readyz", "/metrics", "/docs", "/redoc",

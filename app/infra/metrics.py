@@ -94,6 +94,8 @@ AUTH_ATTEMPTS = _counter("tdp_auth_attempts_total", "认证结果分布",
                          ("result",))   # ok|login_ok|missing|expired|invalid|bad_role|forbidden
 # 429 变多说明有人在打接口，或者自己的客户端在重试风暴里
 RATE_LIMITED = _counter("tdp_rate_limited_total", "被限流拒绝的请求数", ("route",))
+# 限流降级次数：Redis 挂了会退回进程内桶，这个数持续上涨说明"限流已经不全局了"
+RATE_LIMIT_FALLBACKS = _counter("tdp_rate_limit_fallbacks_total", "限流降级到进程内的次数")
 # 注意：**不要**给每个桶（用户/IP）建 gauge —— 标签基数会随用户数爆炸，
 # 那是 Prometheus 的经典反模式。要看桶，用 /metrics 之外的调试接口或日志。
 

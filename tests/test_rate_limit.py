@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 
+from typing import List
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -121,3 +123,71 @@ def test_route_label_has_no_ids() -> None:
     """指标标签不能用真实 URL：/v1/defects/123 会把基数打爆。"""
     assert ratelimit.route_label("/v1/defects/123") == "/v1/defects"
     assert ratelimit.route_label("/v1/vehicles/VIN001") == "/v1/vehicles"
+# ────────────────────────── Redis 全局限流（多副本）──────────────────────────
+@pytest.fixture()
+def redis_ok():
+    from app.infra import cache
+
+    cache.reset_connection()
+    if not cache.available():
+        pytest.skip("Redis 不可用（先跑 dev.cmd init）")
+    ratelimit.reset()
+    yield
+    ratelimit.reset()
+
+
+def test_redis_limiter_selected_by_default(redis_ok) -> None:
+    assert isinstance(ratelimit.get_limiter(), ratelimit.RedisLimiter)
+
+
+def test_redis_limiter_shares_quota_between_replicas(redis_ok) -> None:
+    """两个 limiter 实例 = 两个副本：配额必须共享，而不是各 5 个。"""
+    import uuid as _uuid
+
+    bucket = f"replica-{_uuid.uuid4().hex[:8]}"
+    a = ratelimit.RedisLimiter(limit=5, window_seconds=60)
+    b = ratelimit.RedisLimiter(limit=5, window_seconds=60)   # 另一个“副本”
+    allowed = [a.check(bucket)[0] for _ in range(3)] + [b.check(bucket)[0] for _ in range(3)]
+    assert allowed == [True, True, True, True, True, False], allowed
+
+
+def test_redis_limiter_is_atomic_under_concurrency(redis_ok) -> None:
+    """并发下不能超发：容量 10，20 个线程同时抢，只能过 10 个。"""
+    import threading
+    import uuid as _uuid
+
+    bucket = f"race-{_uuid.uuid4().hex[:8]}"
+    limiter = ratelimit.RedisLimiter(limit=10, window_seconds=60)
+    results: List[bool] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(20)
+
+    def worker() -> None:
+        barrier.wait(timeout=30)
+        ok, _ = limiter.check(bucket)
+        with lock:
+            results.append(ok)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count(True) == 10, f"超发了：{results.count(True)}/20 通过"
+
+
+def test_redis_limiter_falls_back_when_redis_down(redis_ok, monkeypatch) -> None:
+    """Redis 挂了必须降级放行（限流不准 < 服务全挂），并且要计数。"""
+    from app.infra import cache
+
+    monkeypatch.setattr(cache, "client", lambda: None)
+    limiter = ratelimit.RedisLimiter(limit=2, window_seconds=60)
+    assert limiter.check("fallback-1")[0] is True
+    assert limiter.check("fallback-1")[0] is True
+    assert limiter.check("fallback-1")[0] is False      # 进程内桶兜底生效
+
+
+def test_memory_backend_can_be_forced(monkeypatch) -> None:
+    monkeypatch.setenv("TDP_RATE_LIMIT_BACKEND", "memory")
+    ratelimit.reset()
+    assert isinstance(ratelimit.get_limiter(), ratelimit.Limiter)
