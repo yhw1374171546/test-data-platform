@@ -15,7 +15,7 @@
 | --- | --- |
 | **是什么** | 整车测试的「车辆档期 · 任务领取 · 问题单 · 日报对账」后端 + 3 页管理界面 |
 | **技术栈** | Python · FastAPI · SQLAlchemy 2.x · PostgreSQL 16 · Redis · Vue 3 + Element Plus · Docker · GitHub Actions |
-| **规模** | 19 表 / 48 索引 · **223 个自动化用例**（覆盖率 **91%**）· 44 项 HTTP 冒烟 · 10 项压测 · 9 份实验报告 |
+| **规模** | 19 表 / 48 索引 · **224 个自动化用例**（覆盖率 **91%**）· 44 项 HTTP 冒烟 · 10 项压测 · 9 份实验报告 |
 | **三个硬结果** | 1000 并发抢同一档期**重复占用 0、成功恰好 1**；死信重放后汇总差异**归零**；深分页第 2.5 万页 **148ms → 1.2ms** |
 | **怎么跑** | `python scripts/init_db.py --seed-demo` → `dev.cmd`（Windows 一键）；或 `dev.cmd api` 后打开 <http://127.0.0.1:8000/ui/> |
 
@@ -57,7 +57,9 @@
 
 报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：223 个**（纯函数 47 + 落库/集成 79 + HTTP 契约 97），`app/` 覆盖率 **91%**（CI 门禁 85%），`dev.cmd` 端到端冒烟 **44 项**。
+其他文档：[技术方案](docs/技术方案.md) · [部署与安全清单](docs/部署.md) · [工程取舍与已知边界](docs/工程取舍与已知边界.md)
+
+**当前测试规模：224 个**（纯函数 48 + 落库/集成 79 + HTTP 契约 97），`app/` 覆盖率 **91%**（CI 门禁 85%），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -74,7 +76,7 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（223 个用例，真库 + Redis；加 `--cov=app` 看覆盖率） |
+| `dev.cmd test` | `pytest`（224 个用例，真库 + Redis；加 `--cov=app` 看覆盖率） |
 | `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |

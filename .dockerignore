@@ -13,5 +13,14 @@ docs
 pgdata
 *.log
 .env
+.env.example
 Dockerfile
 docker-compose.yml
+docker-compose.prod.yml
+deploy
+
+# 前端：依赖和构建产物都不进构建上下文
+# （node_modules 几百 MB，漏掉这两行 docker build 会先把它传上去再丢弃，白等几分钟）
+web/node_modules
+web/dist
+web/.vite

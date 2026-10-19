@@ -21,6 +21,8 @@ x-app-env: &app-env
   TDP_RATE_LIMIT_WINDOW: ${TDP_RATE_LIMIT_WINDOW:-60}
   TDP_RATE_LIMIT_BACKEND: redis
   TDP_LOG_LEVEL: ${TDP_LOG_LEVEL:-INFO}
+  # admin 初始口令（migrate 灌库时用），不设则退回代码里的默认值
+  TDP_ADMIN_PASSWORD: ${TDP_ADMIN_PASSWORD:-}
   TDP_OTLP_ENDPOINT: ${TDP_OTLP_ENDPOINT:-}
 
 services:

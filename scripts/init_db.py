@@ -67,6 +67,13 @@ def demo_users() -> list[tuple[str, str, str]]:
     这比给 admin 安全得多 —— 公网上谁都能点的 admin 等于没有权限。
     """
     users = list(DEMO_USERS)
+
+    # 线上可以把 admin 的初始口令从环境变量注入，这样即使忘了改口令，
+    # 公网上的 admin 也不是众所周知的那一个（比"记得改"更可靠）。
+    admin_password = (os.environ.get("TDP_ADMIN_PASSWORD") or "").strip()
+    if admin_password:
+        users = [(u, admin_password, r) if u == "admin" else (u, pw, r) for u, pw, r in users]
+
     username = (os.environ.get("TDP_DEMO_USER") or "").strip()
     password = (os.environ.get("TDP_DEMO_PASSWORD") or "").strip()
     if username and password:

@@ -40,6 +40,14 @@ def test_demo_user_from_env_is_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(init_db.demo_users()) == 4
 
 
+def test_admin_password_can_be_injected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """线上用环境变量覆盖 admin 初始口令：不依赖"上线后记得改"。"""
+    monkeypatch.setenv("TDP_ADMIN_PASSWORD", "Str0ng-Admin-Pass-123")
+    users = {u: p for u, p, _r in init_db.demo_users()}
+    assert users["admin"] == "Str0ng-Admin-Pass-123"
+    assert users["tester"] == "Tester@12345", "只覆盖 admin，别动其它演示账号"
+
+
 def test_demo_user_requires_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TDP_DEMO_USER", "guest")
     monkeypatch.delenv("TDP_DEMO_PASSWORD", raising=False)
