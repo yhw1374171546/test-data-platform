@@ -37,7 +37,7 @@
 
 报告：[`docs/实验报告_任务领取.md`](docs/实验报告_任务领取.md) · [`docs/实验报告_执行结果与outbox.md`](docs/实验报告_执行结果与outbox.md) · [`docs/实验报告_outbox汇总与故障注入.md`](docs/实验报告_outbox汇总与故障注入.md) · [`docs/实验报告_日终对账.md`](docs/实验报告_日终对账.md) · [`docs/实验报告_缓存一致性.md`](docs/实验报告_缓存一致性.md) · [`docs/实验报告_P99与深分页.md`](docs/实验报告_P99与深分页.md) · [`docs/实验报告_工程化.md`](docs/实验报告_工程化.md) · [`docs/实验报告_认证限流与追踪.md`](docs/实验报告_认证限流与追踪.md)
 
-**当前测试规模：183 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 67），`dev.cmd` 端到端冒烟 **44 项**。
+**当前测试规模：201 个**（纯函数 37 + 落库/集成 79 + HTTP 契约 85），`dev.cmd` 端到端冒烟 **44 项**。
 
 ---
 
@@ -54,7 +54,7 @@ dev.cmd
 | `dev.cmd` | 默认：`check` + `init` + `test` + `smoke` |
 | `dev.cmd check` | 只体检：Python / 依赖 / PG 连通性 / 表结构 / pytest |
 | `dev.cmd init` | 建库建表 + 演示主数据（幂等，可反复跑） |
-| `dev.cmd test` | `pytest`（183 个用例，真库 + Redis） |
+| `dev.cmd test` | `pytest`（201 个用例，真库 + Redis） |
 | `dev.cmd smoke` | 起临时服务，跑 44 项真实 HTTP 冒烟（含认证/缓存/汇总/对账），自动关闭并清理本次占用的档期与任务 |
 | `dev.cmd worker` | 跑 outbox worker 处理积压（默认处理完就退出；`-Watch` 常驻轮询） |
 | `dev.cmd recon` | 跑日终对账（明细 vs 汇总 vs 失败是否提单），差异单打印成表 |
@@ -157,8 +157,13 @@ python scripts/api_smoke.py --base-url http://127.0.0.1:8000
   `/v1/jobs/*` 与 `/v1/admin/*` 需要 admin。演示账号（`init_db --seed-demo` 灌入）：
   `admin/Admin@12345`、`tester/Tester@12345`、`viewer/Viewer@12345`。
   `TDP_AUTH=off` 可关掉认证（**仅内网联调**，关闭后匿名按 admin 放行）。
+- **ABAC：非管理员只能操作自己参与的项目**（`project_members` 表）。
+  列表接口按成员关系过滤，**零成员关系返回空页而不是全部**；
+  按 `task_id` / `defect_no` / `booking_no` 操作时服务端会**反查**项目，不信任客户端传的 `project_id`。
+  `init_db --seed-demo` 会把 tester / viewer 加进演示项目；admin 不需要成员关系（直通）。
 - **限流**：令牌桶，默认 `600 次 / 60 秒`（按用户分桶，无 token 按 IP）；
   拒绝返回 `429` + `Retry-After`。`/healthz` `/readyz` `/metrics` 豁免。
+  多副本设 `TDP_RATE_LIMIT_BACKEND=redis`，用 Lua 共享配额；Redis 挂了自动降级到进程内并计数。
 - **写接口必须带 `Idempotency-Key`**：同 key 同 body → 返回首次响应（`replay=true`）；
   同 key 换 body → `422`，且不产生任何副作用；缺头 → `400`。
   **例外**：`PATCH /v1/vehicles/{vin}` 设的是绝对值，同一个 body 调 N 次结果一样，
@@ -222,7 +227,7 @@ Invoke-RestMethod 'http://127.0.0.1:8000/v1/admin/recon/discrepancies?resolved=f
 test-data-platform/
 ├── app/
 │   ├── api/          bookings.py / defects.py / queue.py / executions.py
-│   │                 jobs.py / admin.py / catalog.py / auth.py / authz.py
+│   │                 jobs.py / admin.py / catalog.py / auth.py / authz.py / abac.py
 │   │                 deps.py / errors.py / schemas.py / context.py
 │   ├── domain/       defect_state.py（状态机）· queue_state.py（队列规则）
 │   │                 slot_policy.py（半天粒度）· biz_time.py（业务日期口径）
@@ -232,13 +237,14 @@ test-data-platform/
 │   │                 outbox.py（worker：重算汇总/退避/死信/批量失效）
 │   │                 recon.py（三方对账 + 差异单自动解决）
 │   │                 catalog.py（车辆/用例详情：缓存读 + 会失效的写）
-│   │                 users.py（账号校验：不认识 HTTP）
+│   │                 users.py（账号校验）· members.py（项目成员 + 资源反查）
 │   ├── infra/        db.py · idempotency.py · metrics.py
 │   │                 cache.py（三策略 + 负对照）· redis_lock.py（预占：C 方案的漏斗）
 │   │                 auth.py（口令哈希 + JWT）· ratelimit.py（令牌桶）· tracing.py（OTel）
 │   └── main.py       中间件（trace_id + 指标）→ 路由 → 运维端点
 ├── alembic.ini · migrations/env.py（不做 autogenerate：表是手写 SQL）
-├── migrations/sql/001_baseline.sql · 002_perf_indexes.sql · 003_app_users.sql（DDL 单一来源）
+├── migrations/sql/001_baseline.sql · 002_perf_indexes.sql · 003_app_users.sql
+│                     004_project_members.sql（DDL 单一来源）
 ├── migrations/versions/0001_baseline.py · 0002_perf_indexes.py · 0003_app_users.py（只做版本编排）
 ├── scripts/          init_db.py（建库建表+演示数据）· api_smoke.py（真实 HTTP 冒烟）
 │                     outbox_worker.py（常驻 worker）· recon.py（对账命令行）
@@ -246,7 +252,8 @@ test-data-platform/
 │                     test_claim_flow.py · test_execution_flow.py · test_biz_time.py
 │                     test_outbox_worker.py · test_recon_rules.py · test_recon_flow.py
 │                     test_cache_catalog.py · test_booking_schemes.py
-│                     test_auth.py · test_rate_limit.py · test_tracing.py · test_api.py
+│                     test_auth.py · test_rate_limit.py · test_tracing.py
+│                     test_abac.py · test_api.py
 │                     conftest.py
 ├── bench/            slot_contention.py（档期竞争）· claim_race.py（领取竞争）
 │                     execution_submit.py（提交竞争）· outbox_fault.py（故障注入）
@@ -393,8 +400,9 @@ test-data-platform/
 | ~~CI~~ ✅ | [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：真 PG+Redis 跑 150 用例 + 40 项冒烟 + 镜像构建 | 推到 GitHub 后自动生效（当前无 remote） |
 | ~~Dockerfile / compose~~ ✅ | `docker compose up --build` 一条命令起 PG/Redis/migrate/app/worker | 本机没装 Docker，未经本地构建验证；CI 的 `docker` job 兜底 |
 | ~~HTTP 层压测 / 多 worker~~ ✅ | `bench/http_load.py`、`bench/multi_worker.py`（后者证明 0 条重复处理） | 容量结论仍只有单进程 uvicorn |
-| 幂等键 TTL | `idempotency_keys` 只增不删 | 定时任务按 `created_at` 删（索引已在 002 里备好） |
+| ~~分布式限流~~ ✅ | `TDP_RATE_LIMIT_BACKEND=redis`：Lua 令牌桶，多副本共享；Redis 挂了降级并计数 | 配额按"每个用户"，没做租户总量 |
 | ~~429 限流~~ ✅ | 令牌桶中间件（按用户/IP 分桶、探针豁免、`Retry-After`） | 多副本要换 Redis 做全局配额 |
 | ~~认证~~ ✅ | JWT + `app_users` + 三角色（admin/tester/viewer），401/403 全覆盖 | 细粒度 ABAC（按 project_id 过滤）仍没做 |
 | ~~告警规则~~ ✅ / 调度 ❌ | `deploy/prometheus/alerts.yml` 7 条规则 + 13 面板 dashboard；worker/对账仍靠手动跑 | 缺 cron/常驻调度 |
+| ~~ABAC~~ ✅ | 按项目隔离（13 条越权用例）；按资源 ID 操作一律反查项目 | 没做字段级权限 |
 | 缓存穿透 / 击穿 | 不存在的 key 会反复回源；热 key 过期瞬间回源 | 空值短 TTL 缓存 + 单飞重建 |
