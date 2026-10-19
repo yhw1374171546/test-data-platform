@@ -88,5 +88,38 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # 监控：Prometheus 抓 /metrics，并按 alerts.yml 告警
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+
+  # 面板：数据源与 dashboard 由 provisioning 自动装载（不用手工点）
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin        # 演示用；生产必须改
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
+  promdata:
+  grafanadata:

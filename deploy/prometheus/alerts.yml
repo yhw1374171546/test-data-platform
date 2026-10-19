@@ -1,0 +1,84 @@
+# 告警规则：每一条都对应"会真出事"的场景，不是凑数的。
+#
+# 判定原则：
+#  · 死信、对账差异 → 立即告警（不会自愈，必须人工介入）
+#  · 积压、5xx 比例、429 比例 → 持续一段时间再告警（抖动一次不值得叫醒人）
+#  · 缓存命中率、认证失败 → 长周期趋势（慢火，但烧起来很难看）
+groups:
+  - name: tdp-critical
+    rules:
+      - alert: OutboxDeadLetters
+        expr: tdp_outbox_dead > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "outbox 出现死信（{{ $value }} 条）"
+          description: >-
+            死信不会自愈，必须人工重放：POST /v1/admin/outbox/replay。
+            先查 last_error 判断是数据问题（项目/版本已删）还是依赖问题。
+
+      - alert: ReconDiscrepancies
+        expr: sum(tdp_recon_discrepancies) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "日终对账有未解决差异（{{ $value }} 条）"
+          description: >-
+            看 /v1/admin/recon/discrepancies 按 kind 区分：少算/多算/漏提单。
+            missing_summary 通常意味着 worker 挂了或消息丢了。
+
+  - name: tdp-warning
+    rules:
+      - alert: OutboxBacklogGrowing
+        expr: tdp_outbox_pending > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "outbox 积压 {{ $value }} 条，且持续 10 分钟"
+          description: "worker 跟不上或没在跑。看 worker 日志与处理速率（tdp_outbox_batches_total）。"
+
+      - alert: Http5xxRatio
+        expr: |
+          sum(rate(tdp_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(tdp_http_requests_total[5m])), 0.001) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "5xx 比例超过 1%（当前 {{ $value | humanizePercentage }}）"
+          description: "5xx 永远是我们自己的问题：看日志里的 trace_id，再到追踪系统找那条 trace。"
+
+      - alert: RateLimitedSpike
+        expr: sum(rate(tdp_rate_limited_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "429 速率 {{ $value }}/s，有人在打接口或客户端在重试风暴"
+          description: >-
+            先看是哪个 route；如果是自己的客户端，检查它有没有遵守 Retry-After。
+
+      - alert: CacheHitRateLow
+        expr: |
+          sum(rate(tdp_cache_hits_total[10m]))
+            / clamp_min(sum(rate(tdp_cache_hits_total[10m])) + sum(rate(tdp_cache_misses_total[10m])), 0.001) < 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "缓存命中率低于 50%（当前 {{ $value | humanizePercentage }}）"
+          description: >-
+            常见原因：TTL 太短、写路径失效太频繁、key 拼错（永远不命中）。
+            tdp_cache_invalidations_total 为 0 才是更危险的信号——写路径忘了失效。
+
+      - alert: AuthFailuresSpike
+        expr: sum(rate(tdp_auth_attempts_total{result!="ok",result!="login_ok"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "认证失败速率 {{ $value }}/s，可能在扫口令或客户端 token 过期没刷新"
+          description: "按 result 区分：invalid/expired 多半是自己人；forbidden 是权限配错了。"

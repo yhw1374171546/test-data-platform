@@ -1,0 +1,18 @@
+# Prometheus 抓取配置（容器内网）
+#
+# app 暴露的是 /metrics（prometheus_client 的标准文本格式）。
+# 单实例直接抓；多副本换成 dns_sd 或加 service 发现即可。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: tdp-app
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:8000"]
+        labels:
+          service: test-data-platform
