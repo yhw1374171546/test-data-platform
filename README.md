@@ -9,6 +9,24 @@
 
 ---
 
+## 30 秒速览
+
+| | |
+| --- | --- |
+| **是什么** | 整车测试的「车辆档期 · 任务领取 · 问题单 · 日报对账」后端 + 3 页管理界面 |
+| **技术栈** | Python · FastAPI · SQLAlchemy 2.x · PostgreSQL 16 · Redis · Vue 3 + Element Plus · Docker · GitHub Actions |
+| **规模** | 19 表 / 48 索引 · **223 个自动化用例**（覆盖率 **91%**）· 44 项 HTTP 冒烟 · 10 项压测 · 9 份实验报告 |
+| **三个硬结果** | 1000 并发抢同一档期**重复占用 0、成功恰好 1**；死信重放后汇总差异**归零**；深分页第 2.5 万页 **148ms → 1.2ms** |
+| **怎么跑** | `python scripts/init_db.py --seed-demo` → `dev.cmd`（Windows 一键）；或 `dev.cmd api` 后打开 <http://127.0.0.1:8000/ui/> |
+
+### 界面
+
+| 档期预约 | 任务领取 | 日报看板 |
+| --- | --- | --- |
+| ![档期预约](docs/screenshots/slots.png) | ![任务领取](docs/screenshots/queue.png) | ![日报看板](docs/screenshots/dashboard.png) |
+
+---
+
 ## 进度
 
 ### 第 1 周（已完成）
